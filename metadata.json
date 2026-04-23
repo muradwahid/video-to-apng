@@ -1,0 +1,6 @@
+{
+  "name": "Lumina Video Studio",
+  "description": "Professional-grade browser-based video editor with precision cropping, timeline editing, and advanced APNG export.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["video-editing", "apng-conversion"]
+}
