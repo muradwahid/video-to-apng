@@ -68,4 +68,5 @@ export interface APNGOptions {
   loopCount?: number;
   scale?: number;
   loopDelay?: number; // seconds
+  format?: 'apng' | 'webm';
 }

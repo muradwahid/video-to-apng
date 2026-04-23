@@ -66,8 +66,7 @@ export const Filmstrip: React.FC<Props> = ({ url, duration, zoom, sourceStart, s
   }, [url, frameCount, sourceStart, sourceEnd]);
 
   return (
-    <div className="absolute inset-0 flex overflow-hidden pointer-events-none opacity-80">
-      <div className="absolute inset-0 bg-blue-500/10 mix-blend-overlay z-10" />
+    <div className="absolute inset-0 flex overflow-hidden pointer-events-none opacity-100">
       {thumbnails.map((src, i) => (
         <div 
           key={i} 

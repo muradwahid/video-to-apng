@@ -21,58 +21,68 @@ export const APNGConverter: React.FC<Props> = ({ onConvert, isProcessing, progre
   });
 
   return (
-    <div className="space-y-6">
+    <div className="space-y-6 pb-4">
       <div className="grid grid-cols-2 gap-4">
-        <SettingTile 
-          label="Target FPS" 
-          value={options.fps} 
-          displayValue={options.fps}
-          min={1} max={60} 
-          onChange={(v) => setOptions({ ...options, fps: v })} 
-        />
-        <SettingTile 
-          label="Loop Count" 
-          value={options.loopCount} 
-          displayValue={options.loopCount === 0 ? "Infinite" : options.loopCount}
-          min={0} max={10} 
-          onChange={(v) => setOptions({ ...options, loopCount: v })} 
-        />
+        <div title="Frames Per Second (animation speed)">
+          <SettingTile 
+            label="Target FPS" 
+            value={options.fps} 
+            displayValue={options.fps}
+            min={1} max={60} 
+            onChange={(v: number) => setOptions({ ...options, fps: v })} 
+          />
+        </div>
+        <div title="Number of times the APNG will loop (0 = infinite)">
+          <SettingTile 
+            label="Loop Count" 
+            value={options.loopCount} 
+            displayValue={options.loopCount === 0 ? "Infinite" : options.loopCount}
+            min={0} max={10} 
+            onChange={(v: number) => setOptions({ ...options, loopCount: v })} 
+          />
+        </div>
       </div>
 
       <div className="grid grid-cols-2 gap-4">
+        <div title="Time in seconds to hold the last frame before looping again">
+          <SettingTile 
+            label="Gap Time (s)" 
+            value={options.loopDelay} 
+            displayValue={options.loopDelay + "s"}
+            min={0} max={5}
+            onChange={(v: number) => setOptions({ ...options, loopDelay: v })} 
+          />
+        </div>
+        <div title="Palette compression quality (lower = smaller file)">
+          <SettingTile 
+            label="Quality" 
+            displayValue={options.quality + "%"} 
+            value={options.quality}
+            min={10} max={100} 
+            onChange={(v: number) => setOptions({ ...options, quality: v })} 
+          />
+        </div>
+      </div>
+
+      <div title="Overall scale of the exported animation relative to 1080p">
         <SettingTile 
-          label="Gap Time (s)" 
-          value={options.loopDelay} 
-          displayValue={options.loopDelay + "s"}
-          min={0} max={5}
-          onChange={(v) => setOptions({ ...options, loopDelay: v })} 
-        />
-        <SettingTile 
-          label="Quality" 
-          displayValue={options.quality + "%"} 
-          value={options.quality}
+          label="Scale" 
+          displayValue={Math.round(options.scale * 100) + "%"} 
+          value={options.scale * 100}
           min={10} max={100} 
-          onChange={(v) => setOptions({ ...options, quality: v })} 
+          onChange={(v: number) => setOptions({ ...options, scale: v / 100 })} 
         />
       </div>
 
-      <SettingTile 
-        label="Scale" 
-        displayValue={Math.round(options.scale * 100) + "%"} 
-        value={options.scale * 100}
-        min={10} max={100} 
-        onChange={(v) => setOptions({ ...options, scale: v / 100 })} 
-      />
-
-      <div className="space-y-4 rounded-lg bg-black p-4 border border-white/5">
+      <div className="space-y-4 rounded-lg bg-black p-4 border border-white/5" title="Advanced processing toggles">
         <h4 className="text-[10px] font-bold uppercase tracking-widest text-gray-500">Advanced Engine</h4>
         
-        <div className="flex items-center justify-between group cursor-pointer">
+        <div className="flex items-center justify-between group cursor-pointer" onClick={() => setOptions({ ...options, dithering: !options.dithering })}>
           <div className="space-y-0.5">
             <span className="text-[11px] font-medium text-gray-300">Dithering Algorithm</span>
             <p className="text-[9px] text-gray-600">Floyd-Steinberg Spatial</p>
           </div>
-          <Toggle active={options.dithering} onClick={() => setOptions({ ...options, dithering: !options.dithering })} />
+          <Toggle active={options.dithering} onClick={() => {}} />
         </div>
       </div>
 
@@ -89,24 +99,24 @@ export const APNGConverter: React.FC<Props> = ({ onConvert, isProcessing, progre
             <motion.div 
               initial={{ width: 0 }}
               animate={{ width: `${progress * 100}%` }}
-              className="h-full bg-orange-600 shadow-[0_0_12px_rgba(234,88,12,0.4)]"
+              className="h-full shadow-[0_0_12px_rgba(234,88,12,0.4)] bg-orange-600 shadow-orange-600/40"
             />
           </div>
         </div>
       ) : (
         <button 
-          onClick={() => onConvert(options)}
-          className="w-full py-4 bg-orange-600/10 text-orange-400 border border-orange-600/30 rounded-lg text-[11px] font-bold uppercase tracking-[0.2em] transition-all hover:bg-orange-600/20 active:scale-95"
+          title="Start generating Animated PNG"
+          onClick={() => onConvert({ ...options, format: 'apng' })}
+          className="w-full py-4 border rounded-lg text-[11px] font-bold uppercase tracking-[0.2em] transition-all active:scale-95 bg-orange-600/10 text-orange-400 border-orange-600/30 hover:bg-orange-600/20"
         >
           Generate APNG
         </button>
       )}
 
-      <div className="flex items-start gap-3 rounded-lg bg-orange-950/10 p-3 border border-orange-900/20">
-        <AlertCircle className="h-4 w-4 text-orange-600 shrink-0 mt-0.5" />
-        <p className="text-[10px] leading-relaxed text-orange-400/60 font-medium italic">
-          Palette optimization is synced with target color depth. 
-          Expected size: ~4.2MB
+      <div className="flex items-start gap-3 rounded-lg p-3 border bg-orange-950/10 border-orange-900/20">
+        <AlertCircle className="h-4 w-4 shrink-0 mt-0.5 text-orange-600" />
+        <p className="text-[10px] leading-relaxed font-medium italic text-orange-400/60">
+          Palette optimization is synced with target color depth. Expected size: ~4.2MB
         </p>
       </div>
     </div>

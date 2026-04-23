@@ -7,9 +7,10 @@ interface Props {
   currentTime: number;
   width: number;
   height: number;
+  isCropping?: boolean;
 }
 
-export const VideoCanvas: React.FC<Props> = ({ clips, currentTime, width, height }) => {
+export const VideoCanvas: React.FC<Props> = ({ clips, currentTime, width, height, isCropping }) => {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const videoRef = useRef<HTMLVideoElement | null>(null);
   const lastUrlRef = useRef<string | null>(null);
@@ -75,14 +76,17 @@ export const VideoCanvas: React.FC<Props> = ({ clips, currentTime, width, height
         if (clip.type === 'video' && videoRef.current && lastUrlRef.current === clip.url) {
           if (clip.transform.crop) {
             const { x, y, width: cw, height: ch } = clip.transform.crop;
-            // Draw only the cropped portion of the video to fill the entire canvas
+            // Draw only the cropped portion of the video mapping to the exact same position relative to the canvas
             ctx.drawImage(
               videoRef.current,
               x * videoRef.current.videoWidth,
               y * videoRef.current.videoHeight,
               cw * videoRef.current.videoWidth,
               ch * videoRef.current.videoHeight,
-              0, 0, width, height
+              x * width, 
+              y * height, 
+              cw * width, 
+              ch * height
             );
           } else {
             ctx.drawImage(videoRef.current, 0, 0, width, height);

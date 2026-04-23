@@ -133,30 +133,32 @@ export const CropTool: React.FC<Props> = ({ onCropChange, onApply, onCancel, ini
 
       <div className="absolute bottom-6 left-1/2 -translate-x-1/2 flex items-center gap-6 bg-black/90 backdrop-blur-xl px-8 py-3 rounded-full border border-white/10 shadow-[0_20px_50px_rgba(0,0,0,0.5)] z-50">
         <div className="flex gap-4 border-r border-white/10 pr-6 mr-2">
-          <PresetButton label="16:9" onClick={() => {
+          <PresetButton title="Snap to landscape aspect ratio" label="16:9" onClick={() => {
             const h = crop.width * (9/16);
             setCrop({ ...crop, height: Math.min(h, 1 - crop.y) });
           }} />
-          <PresetButton label="9:16" onClick={() => {
+          <PresetButton title="Snap to portrait (TikTok/Reels) aspect ratio" label="9:16" onClick={() => {
             const w = crop.height * (9/16);
             setCrop({ ...crop, width: Math.min(w, 1 - crop.x) });
           }} />
-          <PresetButton label="1:1" onClick={() => {
+          <PresetButton title="Snap to square aspect ratio" label="1:1" onClick={() => {
             const size = Math.min(crop.width, crop.height);
             setCrop({ ...crop, width: size, height: size });
           }} />
-          <PresetButton label="Reset" onClick={() => setCrop({ x: 0.1, y: 0.1, width: 0.8, height: 0.8 })} />
+          <PresetButton title="Reset crop window to full view" label="Reset" onClick={() => setCrop({ x: 0, y: 0, width: 1, height: 1 })} />
         </div>
         
         <div className="flex items-center gap-3">
           <button 
             onClick={onCancel}
+            title="Discard crop changes"
             className="px-4 py-1.5 rounded-full text-[10px] font-bold uppercase tracking-widest text-gray-400 hover:text-white transition-colors"
           >
             Cancel
           </button>
           <button 
             onClick={() => onApply(crop)}
+            title="Save crop settings"
             className="px-6 py-1.5 rounded-full bg-blue-600 text-white text-[10px] font-bold uppercase tracking-widest hover:bg-blue-500 shadow-lg shadow-blue-600/20 transition-all active:scale-95"
           >
             Apply Crop
@@ -177,9 +179,9 @@ function Handle({ position, onMouseDown }: { position: string, onMouseDown: (e: 
   );
 }
 
-function PresetButton({ label, onClick }: any) {
+function PresetButton({ label, onClick, title }: any) {
   return (
-    <button onClick={onClick} className="text-[10px] font-bold uppercase tracking-wider text-white/50 hover:text-blue-400 transition-colors">
+    <button title={title} onClick={onClick} className="text-[10px] font-bold uppercase tracking-wider text-white/50 hover:text-blue-400 transition-colors">
       {label}
     </button>
   );

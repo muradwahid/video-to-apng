@@ -3,7 +3,7 @@ import {
   Play, Pause, SkipBack, SkipForward, Scissors as Scissor, Combine, 
   Crop as CropIcon, Layers, Download, Plus, Video, Music,
   Settings, History, Maximize2, Trash2, Sliders, Image as ImageIcon,
-  Monitor, Info, Zap
+  Monitor, Info, Zap, RefreshCw
 } from "lucide-react";
 import { motion, AnimatePresence } from "motion/react";
 import { cn, formatTime } from "@/src/lib/utils";
@@ -53,7 +53,10 @@ export default function App() {
   const [progress, setProgress] = useState(0);
   const [snapEnabled, setSnapEnabled] = useState(true);
 
-  const requestRef = useRef<number>(null);
+  const [showVideoExportModal, setShowVideoExportModal] = useState(false);
+  const [videoExportConfig, setVideoExportConfig] = useState({ quality: '1080p', fps: 60 });
+
+  const requestRef = useRef<number | null>(null);
   const lastTimeRef = useRef<number>(0);
 
   const [history, setHistory] = useState<{ undo: any[], redo: any[] }>({ undo: [], redo: [] });
@@ -93,9 +96,12 @@ export default function App() {
         if (snap !== undefined) t = snap;
       }
 
+      const clipDuration = prev.clips.find(c => c.id === id)?.duration || 0;
+      
       return {
         ...prev,
-        clips: prev.clips.map(c => c.id === id ? { ...c, startTime: t } : c)
+        clips: prev.clips.map(c => c.id === id ? { ...c, startTime: t } : c),
+        duration: Math.max(prev.duration, t + clipDuration + 5)
       };
     });
   }, [snapEnabled]);
@@ -148,7 +154,8 @@ export default function App() {
       return {
         ...prev,
         clips: [...prev.clips.filter(c => c.id !== clip.id), clipA, clipB],
-        selectedClipId: clipB.id
+        selectedClipId: clipB.id,
+        duration: Math.max(prev.duration, clipB.startTime + clipB.duration + 5)
       };
     });
     closeContextMenu();
@@ -173,6 +180,58 @@ export default function App() {
     });
     closeContextMenu();
   }, [closeContextMenu]);
+
+  const handleResetTab = useCallback(() => {
+    setState(prev => {
+      const selected = prev.clips.find(c => c.id === prev.selectedClipId);
+      if (!selected) return prev;
+
+      // Push history before resetting
+      setHistory(hPrev => ({
+        undo: [JSON.parse(JSON.stringify(prev)), ...hPrev.undo].slice(0, 50),
+        redo: []
+      }));
+
+      const newClips = prev.clips.map(c => {
+        if (c.id !== prev.selectedClipId) return c;
+        const n = JSON.parse(JSON.stringify(c)) as VideoClip;
+        switch (activeTab) {
+          case 'media':
+            n.transform.scale = 1;
+            n.transform.x = 0;
+            n.transform.y = 0;
+            n.transform.rotation = 0;
+            n.transform.opacity = 1;
+            n.speed = 1;
+            n.transform.crop = undefined;
+            break;
+          case 'effects':
+             if (n.filters) {
+               n.filters.blur = 0;
+               n.filters.grayscale = 0;
+               n.filters.sepia = 0;
+               n.filters.invert = 0;
+               n.filters.vignette = 0;
+               n.filters.grain = 0;
+             }
+             break;
+          case 'color':
+             if (n.filters) {
+               n.filters.brightness = 1;
+               n.filters.contrast = 1;
+               n.filters.saturation = 1;
+             }
+             break;
+          case 'audio':
+             n.audio = { volume: 1, fadeIn: 0, fadeOut: 0, muted: false };
+             break;
+        }
+        return n;
+      });
+
+      return { ...prev, clips: newClips };
+    });
+  }, [activeTab]);
 
   // Keyboard Shortcuts
   useEffect(() => {
@@ -257,6 +316,179 @@ export default function App() {
     };
   }, [animate]);
 
+  const handleExportVideo = async () => {
+    if (state.clips.length === 0) return;
+    setIsProcessing(true);
+    setProgress(0);
+    setShowVideoExportModal(false);
+
+    try {
+      const resolutionMap: Record<string, {w: number, h: number}> = {
+        '4k': { w: 3840, h: 2160 },
+        '1080p': { w: 1920, h: 1080 },
+        '720p': { w: 1280, h: 720 },
+      };
+      
+      const res = resolutionMap[videoExportConfig.quality.toLowerCase()] || resolutionMap['1080p'];
+      const width = res.w;
+      const height = res.h;
+      const fps = videoExportConfig.fps;
+
+      const minStartTime = Math.min(...state.clips.map(c => c.startTime));
+      const maxEndTime = Math.max(...state.clips.map(c => c.startTime + c.duration));
+      const durationSeconds = maxEndTime - minStartTime;
+      const totalFrames = Math.ceil(durationSeconds * fps);
+
+      const canvas = document.createElement('canvas');
+      canvas.width = width;
+      canvas.height = height;
+      const ctx = canvas.getContext('2d');
+      if (!ctx) throw new Error("Could not get 2d context");
+
+      // Preload media
+      const mediaElements: Record<string, any> = {};
+      
+      await Promise.all(state.clips.map(async (clip) => {
+        if (mediaElements[clip.url]) return;
+        return new Promise<void>((resolve, reject) => {
+          if (clip.type === 'video') {
+            const vid = document.createElement('video');
+            vid.src = clip.url;
+            vid.crossOrigin = "anonymous";
+            vid.muted = true;
+            vid.preload = "auto";
+            vid.onloadeddata = () => { mediaElements[clip.url] = vid; resolve(); };
+            vid.onerror = reject;
+          } else if (clip.type === 'image') {
+            const img = new Image();
+            img.src = clip.url;
+            img.crossOrigin = "anonymous";
+            img.onload = () => { mediaElements[clip.url] = img; resolve(); };
+            img.onerror = reject;
+          } else {
+            resolve();
+          }
+        });
+      }));
+
+      const stream = canvas.captureStream(0);
+      const track = stream.getVideoTracks()[0] as any;
+      const mediaRecorder = new MediaRecorder(stream, { mimeType: 'video/webm' });
+      const recordedChunks: Blob[] = [];
+      
+      mediaRecorder.ondataavailable = e => {
+        if (e.data.size > 0) recordedChunks.push(e.data);
+      };
+      
+      const recordingPromise = new Promise<void>(resolve => {
+        mediaRecorder.onstop = () => resolve();
+      });
+      
+      mediaRecorder.start();
+
+      for (let i = 0; i < totalFrames; i++) {
+        const absoluteTime = minStartTime + (i / fps);
+        
+        ctx.fillStyle = "#000000";
+        ctx.fillRect(0, 0, width, height);
+
+        const activeClips = state.clips.filter(c => absoluteTime >= c.startTime && absoluteTime < c.startTime + c.duration);
+        
+        for (const clip of activeClips) {
+          ctx.save();
+          // We handle transform/rotation, but for proper crop math, we need to map correctly.
+          // Crop operates on the UNTRANSFORMED media bounds.
+          ctx.translate(width / 2, height / 2);
+          ctx.rotate((clip.transform.rotation || 0) * Math.PI / 180);
+          ctx.scale(clip.transform.scale || 1, clip.transform.scale || 1);
+          ctx.translate(-width / 2, -height / 2);
+
+          const media = mediaElements[clip.url];
+          
+          if (clip.filters) {
+            const f = clip.filters;
+            ctx.filter = `brightness(${f.brightness}) contrast(${f.contrast}) saturate(${f.saturation}) blur(${f.blur}px) grayscale(${f.grayscale}) sepia(${f.sepia}) invert(${f.invert})`;
+          } else {
+            ctx.filter = 'none';
+          }
+
+          if (clip.type === 'video' && media instanceof HTMLVideoElement) {
+            const relativeTime = (absoluteTime - clip.startTime) * clip.speed + clip.sourceStart;
+            media.currentTime = relativeTime;
+            
+            await new Promise(resolve => {
+              const onSeeked = () => {
+                media.removeEventListener('seeked', onSeeked);
+                resolve(null);
+              };
+              media.addEventListener('seeked', onSeeked);
+            });
+
+            if (clip.transform.crop) {
+              const { x, y, width: cw, height: ch } = clip.transform.crop;
+              ctx.drawImage(
+                media, 
+                x * media.videoWidth, y * media.videoHeight, cw * media.videoWidth, ch * media.videoHeight, 
+                x * width, y * height, cw * width, ch * height
+              );
+            } else {
+              ctx.drawImage(media, 0, 0, width, height);
+            }
+
+            if (clip.filters) {
+              const f = clip.filters;
+              if (f.vignette > 0) {
+                const gradient = ctx.createRadialGradient(width/2, height/2, 0, width/2, height/2, width * 0.8);
+                gradient.addColorStop(0, 'rgba(0,0,0,0)');
+                gradient.addColorStop(1, `rgba(0,0,0,${f.vignette})`);
+                ctx.fillStyle = gradient;
+                ctx.fillRect(0, 0, width, height);
+              }
+              if (f.grain > 0) {
+                 ctx.fillStyle = `rgba(255,255,255,0.05)`;
+                 for (let j = 0; j < 500 * f.grain; j++) {
+                   ctx.fillRect(Math.random() * width, Math.random() * height, 1, 1);
+                 }
+              }
+            }
+          } else if (clip.type === 'image' && media instanceof HTMLImageElement) {
+            ctx.drawImage(media, 0, 0, width, height);
+          }
+          ctx.restore();
+        }
+        
+        if (track && track.requestFrame) track.requestFrame();
+        await new Promise(r => setTimeout(r, 10));
+        setProgress((i + 1) / totalFrames);
+      }
+
+      mediaRecorder.stop();
+      await recordingPromise;
+
+      const blob = new Blob(recordedChunks, { type: 'video/webm' });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = `lumina_export_${Date.now()}.webm`;
+      a.click();
+      URL.revokeObjectURL(url);
+
+      Object.values(mediaElements).forEach(m => {
+        if (m instanceof HTMLVideoElement) {
+          m.pause();
+          m.src = "";
+          m.load();
+        }
+      });
+    } catch (error) {
+      console.error("Video Export Failed:", error);
+      alert("Failed to export video. See console for details.");
+    } finally {
+      setIsProcessing(false);
+      setProgress(0);
+    }
+  };
+
   const handleConvert = async (options: APNGOptions) => {
     if (state.clips.length === 0) {
       alert("No clips to export!");
@@ -327,15 +559,11 @@ export default function App() {
         });
       }));
 
-      for (let i = 0; i < totalFrames; i++) {
-        const time = minStartTime + (i / fps);
-        
+      const renderFrameAtTime = async (time: number, absoluteTime: number) => {
         // Solid black background prevents "transparency blinks" at loop points or between clips
         ctx.fillStyle = "#000000";
         ctx.fillRect(0, 0, width, height);
 
-        // Calculate exact content boundaries relative to minStartTime
-        const absoluteTime = minStartTime + (i / fps);
         const activeClips = state.clips.filter(c => absoluteTime >= c.startTime && absoluteTime < c.startTime + c.duration);
         
         for (const clip of activeClips) {
@@ -358,7 +586,7 @@ export default function App() {
           }
 
           if (clip.type === 'video' && media instanceof HTMLVideoElement) {
-            const relativeTime = (time - clip.startTime) * clip.speed + clip.sourceStart;
+            const relativeTime = (absoluteTime - clip.startTime) * clip.speed + clip.sourceStart;
             media.currentTime = relativeTime;
             
             // Wait for seek to complete
@@ -375,7 +603,7 @@ export default function App() {
               ctx.drawImage(
                 media,
                 x * media.videoWidth, y * media.videoHeight, cw * media.videoWidth, ch * media.videoHeight,
-                0, 0, width, height
+                x * width, y * height, cw * width, ch * height
               );
             } else {
               ctx.drawImage(media, 0, 0, width, height);
@@ -407,40 +635,47 @@ export default function App() {
           }
           ctx.restore();
         }
+      };
 
-        const imageData = ctx.getImageData(0, 0, width, height).data;
-        frames.push(imageData.buffer);
-        setProgress((i + 1) / totalFrames);
-      }
+        // Output APNG
+        for (let i = 0; i < totalFrames; i++) {
+          const absoluteTime = minStartTime + (i / fps);
+          await renderFrameAtTime(absoluteTime, absoluteTime);
 
-      // Encode to APNG with specified loop count (0 = infinite)
-      const cnum = options.quality && options.quality < 100 ? 256 : 0;
-      
-      // If loopDelay is set, we append a pure black frame for the duration of the delay
-      if (options.loopDelay && options.loopDelay > 0) {
-        const blackCanvas = document.createElement('canvas');
-        blackCanvas.width = width;
-        blackCanvas.height = height;
-        const bCtx = blackCanvas.getContext('2d');
-        if (bCtx) {
-          bCtx.fillStyle = "#000000";
-          bCtx.fillRect(0, 0, width, height);
-          const blackData = bCtx.getImageData(0, 0, width, height).data;
-          frames.push(blackData.buffer);
-          delays.push(Math.round(options.loopDelay * 1000));
+          const imageData = ctx.getImageData(0, 0, width, height).data;
+          frames.push(imageData.buffer);
+          setProgress((i + 1) / totalFrames);
         }
-      }
 
-      const apngBuffer = UPNG.encode(frames, width, height, cnum, delays, options.loopCount !== undefined ? options.loopCount : 0);
-      
-      // Trigger Download
-      const blob = new Blob([apngBuffer], { type: 'image/png' });
-      const url = URL.createObjectURL(blob);
-      const a = document.createElement('a');
-      a.href = url;
-      a.download = `lumina_export_${Date.now()}.png`;
-      a.click();
-      URL.revokeObjectURL(url);
+        // Encode to APNG with specified loop count (0 = infinite)
+        const cnum = options.quality && options.quality < 100 ? 256 : 0;
+        
+        // If loopDelay is set, we append a pure black frame for the duration of the delay
+        if (options.loopDelay && options.loopDelay > 0) {
+          const blackCanvas = document.createElement('canvas');
+          blackCanvas.width = width;
+          blackCanvas.height = height;
+          const bCtx = blackCanvas.getContext('2d');
+          if (bCtx) {
+            bCtx.fillStyle = "#000000";
+            bCtx.fillRect(0, 0, width, height);
+            const blackData = bCtx.getImageData(0, 0, width, height).data;
+            frames.push(blackData.buffer);
+            delays.push(Math.round(options.loopDelay * 1000));
+          }
+        }
+
+        const apngBuffer = UPNG.encode(frames, width, height, cnum, delays, options.loopCount !== undefined ? options.loopCount : 0);
+        
+        // Trigger Download
+        const blob = new Blob([apngBuffer], { type: 'image/png' });
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement('a');
+        a.href = url;
+        a.download = `lumina_export_${Date.now()}.png`;
+        a.click();
+        URL.revokeObjectURL(url);
+
 
       // Cleanup
       Object.values(mediaElements).forEach(m => {
@@ -460,18 +695,40 @@ export default function App() {
     }
   };
 
-  const handleFileUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
+  const getMediaDuration = (url: string, type: 'video' | 'audio'): Promise<number> => {
+    return new Promise((resolve) => {
+      const media = document.createElement(type);
+      media.onloadedmetadata = () => resolve(media.duration);
+      media.onerror = () => resolve(5); // fallback
+      media.src = url;
+    });
+  };
+
+  const handleFileUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const files = e.target.files;
     if (!files) return;
 
     const fileList = Array.from(files);
-    const newAssets: MediaAsset[] = fileList.map((file: File) => ({
-      id: Math.random().toString(36).substr(2, 9),
-      name: file.name,
-      url: URL.createObjectURL(file), // Local blob URL for preview
-      type: file.type.startsWith('video') ? 'video' : file.type.startsWith('audio') ? 'audio' : 'image',
-      size: file.size,
-    }));
+    const newAssetsPromises = fileList.map(async (file: File) => {
+      const type = file.type.startsWith('video') ? 'video' : file.type.startsWith('audio') ? 'audio' : 'image';
+      const url = URL.createObjectURL(file);
+      let duration = 5; // default for images
+      
+      if (type === 'video' || type === 'audio') {
+        duration = await getMediaDuration(url, type);
+      }
+
+      return {
+        id: Math.random().toString(36).substr(2, 9),
+        name: file.name,
+        url,
+        type,
+        size: file.size,
+        duration
+      } as MediaAsset;
+    });
+
+    const newAssets = await Promise.all(newAssetsPromises);
 
     setState(prev => ({
       ...prev,
@@ -505,10 +762,10 @@ export default function App() {
       name: asset.name,
       url: asset.url,
       type: asset.type,
-      duration: 5,
+      duration: asset.duration || 5,
       startTime: startTime,
       sourceStart: 0,
-      sourceEnd: 5,
+      sourceEnd: asset.duration || 5,
       trackIndex: trackIndex,
       volume: 1,
       speed: 1,
@@ -518,7 +775,8 @@ export default function App() {
     setState(prev => ({
       ...prev,
       clips: [...prev.clips, newClip],
-      selectedClipId: newClip.id
+      selectedClipId: newClip.id,
+      duration: Math.max(prev.duration, startTime + newClip.duration + 5) // Add 5 sec padding
     }));
   };
 
@@ -544,10 +802,45 @@ export default function App() {
     if (!state.selectedClipId) return;
     setState(prev => ({
       ...prev,
-      clips: prev.clips.map(c => c.id === prev.selectedClipId ? {
-        ...c,
-        transform: { ...c.transform, crop }
-      } : c)
+      clips: prev.clips.map(c => {
+        if (c.id === prev.selectedClipId) {
+          // Un-apply the scale so the screen crop dimensions map relative to the intrinsic source
+          const S = c.transform.scale || 1;
+          let newX = 0.5 + (crop.x - 0.5) / S;
+          let newY = 0.5 + (crop.y - 0.5) / S;
+          let newW = crop.width / S;
+          let newH = crop.height / S;
+          
+          // Clamp to intrinsic source bounds [0, 1]
+          if (newX < 0) {
+            newW += newX; 
+            newX = 0;
+          }
+          if (newY < 0) {
+            newH += newY;
+            newY = 0;
+          }
+          if (newX + newW > 1) {
+            newW = 1 - newX;
+          }
+          if (newY + newH > 1) {
+            newH = 1 - newY;
+          }
+
+          const transformedCrop = {
+            x: newX,
+            y: newY,
+            width: newW,
+            height: newH,
+          };
+          
+          return {
+            ...c,
+            transform: { ...c.transform, crop: transformedCrop }
+          };
+        }
+        return c;
+      })
     }));
     setShowCropTool(false);
   };
@@ -572,31 +865,83 @@ export default function App() {
         ...prev.clips.filter(c => c.id !== id).map(c => c.startTime + c.duration)
       ] : [];
 
+      let maxTime = prev.duration;
+
+      const newClips = prev.clips.map(c => {
+        if (c.id !== id) {
+          maxTime = Math.max(maxTime, c.startTime + c.duration);
+          return c;
+        }
+        if (edge === 'start') {
+          let newStart = c.startTime + delta;
+          // Snap logic
+          const snap = snapPoints.find(p => Math.abs(p - newStart) < 0.1);
+          if (snap !== undefined) newStart = snap;
+          
+          newStart = Math.max(0, newStart);
+          const newDuration = Math.max(0.1, c.duration - (newStart - c.startTime));
+          maxTime = Math.max(maxTime, newStart + newDuration);
+          return { ...c, startTime: newStart, duration: newDuration };
+        } else {
+          let newEnd = c.startTime + c.duration + delta;
+          // Snap logic
+          const snap = snapPoints.find(p => Math.abs(p - newEnd) < 0.1);
+          if (snap !== undefined) newEnd = snap;
+
+          const newDuration = Math.max(0.1, newEnd - c.startTime);
+          maxTime = Math.max(maxTime, c.startTime + newDuration);
+          return { ...c, duration: newDuration };
+        }
+      });
+
       return {
         ...prev,
-        clips: prev.clips.map(c => {
-          if (c.id !== id) return c;
-          if (edge === 'start') {
-            let newStart = c.startTime + delta;
-            // Snap logic
-            const snap = snapPoints.find(p => Math.abs(p - newStart) < 0.1);
-            if (snap !== undefined) newStart = snap;
-            
-            newStart = Math.max(0, newStart);
-            const newDuration = Math.max(0.1, c.duration - (newStart - c.startTime));
-            return { ...c, startTime: newStart, duration: newDuration };
-          } else {
-            let newEnd = c.startTime + c.duration + delta;
-            // Snap logic
-            const snap = snapPoints.find(p => Math.abs(p - newEnd) < 0.1);
-            if (snap !== undefined) newEnd = snap;
-
-            const newDuration = Math.max(0.1, newEnd - c.startTime);
-            return { ...c, duration: newDuration };
-          }
-        })
+        clips: newClips,
+        duration: Math.max(prev.duration, maxTime + 5)
       };
     });
+  };
+
+  const [isAssetDragOver, setIsAssetDragOver] = useState(false);
+
+  const handleAssetDragOver = (e: React.DragEvent) => {
+    e.preventDefault();
+    if (e.dataTransfer.types.includes("Files")) {
+      setIsAssetDragOver(true);
+    }
+  };
+
+  const handleAssetDragLeave = (e: React.DragEvent) => {
+    setIsAssetDragOver(false);
+  };
+
+  const handleAssetDrop = async (e: React.DragEvent) => {
+    e.preventDefault();
+    setIsAssetDragOver(false);
+    if (e.dataTransfer.files && e.dataTransfer.files.length > 0) {
+      const fileList = Array.from(e.dataTransfer.files);
+      const newAssetsPromises = fileList.map(async (file: File) => {
+        const type = file.type.startsWith('video') ? 'video' : file.type.startsWith('audio') ? 'audio' : 'image';
+        const url = URL.createObjectURL(file);
+        let duration = 5; // default for images
+        
+        if (type === 'video' || type === 'audio') {
+          duration = await getMediaDuration(url, type);
+        }
+
+        return {
+          id: Math.random().toString(36).substr(2, 9),
+          name: file.name,
+          url,
+          type,
+          size: file.size,
+          duration
+        } as MediaAsset;
+      });
+
+      const newAssets = await Promise.all(newAssetsPromises);
+      setState(prev => ({ ...prev, assets: [...prev.assets, ...newAssets] }));
+    }
   };
 
   const handleTimelineInteraction = (e: React.MouseEvent | React.TouchEvent) => {
@@ -653,14 +998,14 @@ export default function App() {
           >
             {contextMenu.targetId ? (
                <>
-                <ContextItem label="Split at playhead" icon={<Scissor size={12}/>} onClick={() => handleSplit(contextMenu.targetId)} />
-                <ContextItem label="Delete Clip" icon={<Trash2 size={12}/>} onClick={() => removeClip(contextMenu.targetId)} danger />
+                <ContextItem label="Split at playhead" tooltip="Split this clip precisely at the current playhead position" icon={<Scissor size={12}/>} onClick={() => handleSplit(contextMenu.targetId)} />
+                <ContextItem label="Delete Clip" tooltip="Remove this clip from the timeline" icon={<Trash2 size={12}/>} onClick={() => removeClip(contextMenu.targetId)} danger />
                </>
             ) : (
               <>
-                <ContextItem label="Add Media" icon={<Plus size={12}/>} onClick={() => fileInputRef.current?.click()} />
-                <ContextItem label="Split Selected" icon={<Scissor size={12}/>} onClick={() => handleSplit()} disabled={!state.selectedClipId} />
-                <ContextItem label="Clear Project" icon={<Trash2 size={12}/>} onClick={clearAssets} danger />
+                <ContextItem label="Add Media" tooltip="Import new media to project" icon={<Plus size={12}/>} onClick={() => fileInputRef.current?.click()} />
+                <ContextItem label="Split Selected" tooltip="Split the currently selected clip at the playhead" icon={<Scissor size={12}/>} onClick={() => handleSplit()} disabled={!state.selectedClipId} />
+                <ContextItem label="Clear Project" tooltip="Remove all assets and reset the project" icon={<Trash2 size={12}/>} onClick={clearAssets} danger />
               </>
             )}
           </motion.div>
@@ -673,23 +1018,23 @@ export default function App() {
             <div className="w-6 h-6 bg-blue-600 rounded flex items-center justify-center">
               <div className="w-2 h-2 bg-white rotate-45"></div>
             </div>
-            <span className="font-bold text-white tracking-tight uppercase">Lumina <span className="text-blue-500">Pro</span></span>
           </div>
           <nav className="flex gap-4 text-[10px] font-bold uppercase tracking-[0.2em] text-gray-500">
-            <span className={cn("cursor-pointer transition-colors hover:text-white", activeTab === "media" && "text-white border-b border-blue-500")} onClick={() => setActiveTab("media")}>Edit</span>
-            <span className={cn("cursor-pointer transition-colors hover:text-white", activeTab === "effects" && "text-white border-b border-blue-500")} onClick={() => setActiveTab("effects")}>Effects</span>
-            <span className={cn("cursor-pointer transition-colors hover:text-white", activeTab === "color" && "text-white border-b border-blue-500")} onClick={() => setActiveTab("color")}>Color</span>
-            <span className={cn("cursor-pointer transition-colors hover:text-white", activeTab === "audio" && "text-white border-b border-blue-500")} onClick={() => setActiveTab("audio")}>Audio</span>
-            <span className={cn("cursor-pointer transition-colors", activeTab === "export" ? "text-orange-500" : "text-gray-500 hover:text-orange-400")} onClick={() => setActiveTab("export")}>APNG Route</span>
+            <span title="Edit basic positioning and timeline placement" className={cn("cursor-pointer transition-colors hover:text-white", activeTab === "media" && "text-white border-b border-blue-500")} onClick={() => setActiveTab("media")}>Edit</span>
+            <span title="Add visual filters and distortion effects" className={cn("cursor-pointer transition-colors hover:text-white", activeTab === "effects" && "text-white border-b border-blue-500")} onClick={() => setActiveTab("effects")}>Effects</span>
+            <span title="Perform color grading and color correction" className={cn("cursor-pointer transition-colors hover:text-white", activeTab === "color" && "text-white border-b border-blue-500")} onClick={() => setActiveTab("color")}>Color</span>
+            <span title="Adjust sound levels and audio fading" className={cn("cursor-pointer transition-colors hover:text-white", activeTab === "audio" && "text-white border-b border-blue-500")} onClick={() => setActiveTab("audio")}>Audio</span>
+            <span title="Optimize and export frames as an Animated PNG" className={cn("cursor-pointer transition-colors", activeTab === "export" ? "text-orange-500" : "text-gray-500 hover:text-orange-400")} onClick={() => setActiveTab("export")}>APNG Route</span>
           </nav>
         </div>
         <div className="flex items-center gap-4">
           <div className="text-[10px] text-gray-500 uppercase tracking-widest font-mono">4K @ 60FPS • {formatTime(state.currentTime)}</div>
           <button 
-            onClick={() => setActiveTab("export")}
+            onClick={() => setShowVideoExportModal(true)}
+            title="Open Export Settings to quickly save out your video"
             className="px-4 py-1.5 bg-blue-600 hover:bg-blue-500 text-white text-[10px] font-bold rounded uppercase tracking-widest transition-all active:scale-95 shadow-lg shadow-blue-600/20"
           >
-            Export Project
+            Export Video
           </button>
         </div>
       </header>
@@ -699,11 +1044,24 @@ export default function App() {
         
         {/* Left: Assets & Settings Column */}
         <section className="w-64 flex flex-col gap-2" onContextMenu={(e) => handleContextMenu(e)}>
-          <div className="rounded-lg border p-3 flex-1 overflow-hidden flex flex-col" style={{ backgroundColor: THEME.card, borderColor: THEME.border }}>
-            <div className="flex items-center justify-between mb-3">
-              <h3 className="text-[10px] font-bold text-gray-500 uppercase tracking-widest">Media Assets</h3>
+          <div 
+            className={cn("rounded-lg border p-3 flex-1 overflow-hidden flex flex-col relative transition-all", isAssetDragOver ? "bg-blue-500/10 border-blue-500" : "")} 
+            style={{ backgroundColor: THEME.card, borderColor: isAssetDragOver ? THEME.accent : THEME.border }}
+            onDragOver={handleAssetDragOver}
+            onDragLeave={handleAssetDragLeave}
+            onDrop={handleAssetDrop}
+          >
+            {isAssetDragOver && (
+              <div className="absolute inset-0 z-20 flex flex-col items-center justify-center bg-blue-900/40 backdrop-blur-sm border-2 border-dashed border-blue-500 rounded-lg">
+                <Plus className="w-8 h-8 text-blue-400 mb-2 animate-bounce" />
+                <span className="text-[11px] font-bold uppercase tracking-widest text-blue-400">Drop files here</span>
+              </div>
+            )}
+            <div className="flex items-center justify-between mb-3 z-10">
+              <h3 className="text-[10px] font-bold text-gray-500 uppercase tracking-widest" title="Manager for imported media files">Media Assets</h3>
               <button 
                 onClick={() => fileInputRef.current?.click()}
+                title="Import new media files (Images, Video, Audio) or drag and drop them below"
                 className="w-4 h-4 rounded-full border border-gray-600 flex items-center justify-center text-[10px] hover:border-gray-400 hover:text-white transition-colors"
               >
                 +
@@ -717,38 +1075,41 @@ export default function App() {
                 className="hidden" 
               />
             </div>
-            <div className="grid grid-cols-2 gap-2 overflow-y-auto pr-1 custom-scrollbar">
+            <div className="grid grid-cols-2 gap-x-2 gap-y-3 overflow-y-auto pr-1 custom-scrollbar z-10 pb-4">
               {state.assets.map((asset) => (
-                <div 
-                  key={asset.id} 
-                  draggable
-                  onDragStart={(e) => handleAssetDragStart(e, asset)}
-                  className="group aspect-video bg-gray-800 rounded relative overflow-hidden border border-white/5 cursor-grab hover:border-blue-500/30 transition-all active:cursor-grabbing"
-                >
-                  <div className="flex h-full w-full items-center justify-center bg-blue-500/5">
-                    {asset.type === 'video' ? <Video className="h-4 w-4 text-blue-500/40" /> : 
-                     asset.type === 'audio' ? <Music className="h-4 w-4 text-emerald-500/40" /> : 
-                     <ImageIcon className="h-4 w-4 text-orange-500/40" />}
-                  </div>
-                  <div className="absolute bottom-1 left-1 text-[7px] bg-black/60 px-1 rounded font-bold truncate max-w-[80%]">{asset.name.split('.').pop()?.toUpperCase()}</div>
-                  <button 
-                    onClick={(e) => { e.stopPropagation(); removeAsset(asset.id); }}
-                    className="absolute top-1 right-1 p-1 bg-black/60 rounded opacity-0 group-hover:opacity-100 transition-opacity hover:bg-red-500/40"
+                <div key={asset.id} className="flex flex-col gap-1.5" title={`Drag ${asset.name} into the timeline to use`}>
+                  <div 
+                    draggable
+                    onDragStart={(e) => handleAssetDragStart(e, asset)}
+                    className="group aspect-video bg-gray-800 rounded relative overflow-hidden border border-white/5 cursor-grab hover:border-blue-500/30 transition-all active:cursor-grabbing"
                   >
-                    <Trash2 className="h-3 w-3 text-white" />
-                  </button>
+                    <div className="flex h-full w-full items-center justify-center bg-blue-500/5">
+                      {asset.type === 'video' ? <Video className="h-4 w-4 text-blue-500/40" /> : 
+                       asset.type === 'audio' ? <Music className="h-4 w-4 text-emerald-500/40" /> : 
+                       <ImageIcon className="h-4 w-4 text-orange-500/40" />}
+                    </div>
+                    <div className="absolute top-1 left-1 text-[7px] bg-black/60 px-1 rounded font-bold uppercase">{asset.type}</div>
+                    <button 
+                      onClick={(e) => { e.stopPropagation(); removeAsset(asset.id); }}
+                      title="Delete permanently"
+                      className="absolute top-1 right-1 p-1 bg-black/60 rounded opacity-0 group-hover:opacity-100 transition-opacity hover:bg-red-500/40"
+                    >
+                      <Trash2 className="h-3 w-3 text-white" />
+                    </button>
+                  </div>
+                  <span className="text-[9px] text-gray-400 truncate leading-tight hover:text-white transition-colors cursor-default" title={asset.name}>{asset.name}</span>
                 </div>
               ))}
               {state.assets.length === 0 && (
                 <div className="col-span-2 flex flex-col items-center justify-center h-full opacity-20 py-8">
                   <Plus className="h-8 w-8 mb-2" />
-                  <span className="text-[10px] uppercase font-bold tracking-widest">No Assets</span>
+                  <span className="text-[10px] uppercase font-bold tracking-widest text-center px-4">Drag & Drop Media Here<br/><span className="text-[8px] font-normal tracking-normal normal-case opacity-70">or click the + button to browse</span></span>
                 </div>
               )}
             </div>
           </div>
           
-          <div className="h-36 rounded-lg border p-3 flex flex-col" style={{ backgroundColor: THEME.card, borderColor: THEME.border }}>
+          <div className="h-36 rounded-lg border p-3 flex flex-col" style={{ backgroundColor: THEME.card, borderColor: THEME.border }} title="Information overview for the current project.">
             <h3 className="text-[10px] font-bold text-gray-500 uppercase tracking-widest mb-2">Project Metrics</h3>
             <div className="space-y-1.5">
               <div className="flex justify-between text-[11px]"><span className="text-gray-600">Resolution</span><span className="text-gray-300">3840 x 2160</span></div>
@@ -776,6 +1137,7 @@ export default function App() {
                   currentTime={state.currentTime} 
                   width={1920} 
                   height={1080} 
+                  isCropping={showCropTool}
                 />
                 
                 {showCropTool && (
@@ -783,7 +1145,17 @@ export default function App() {
                     onCropChange={() => {}} 
                     onApply={handleApplyCrop}
                     onCancel={() => setShowCropTool(false)}
-                    initialCrop={state.clips.find(c => c.id === state.selectedClipId)?.transform.crop}
+                    initialCrop={(() => {
+                      const c = state.clips.find(clip => clip.id === state.selectedClipId);
+                      if (!c || !c.transform.crop) return undefined;
+                      const S = c.transform.scale || 1;
+                      return {
+                        x: 0.5 + (c.transform.crop.x - 0.5) * S,
+                        y: 0.5 + (c.transform.crop.y - 0.5) * S,
+                        width: c.transform.crop.width * S,
+                        height: c.transform.crop.height * S,
+                      };
+                    })()}
                   />
                 )}
               </div>
@@ -791,20 +1163,21 @@ export default function App() {
 
             {/* Preview Controls Overlay */}
             <div className="absolute bottom-6 left-1/2 -translate-x-1/2 bg-black/60 backdrop-blur px-6 py-2 rounded-full border border-white/10 flex items-center gap-8 shadow-2xl">
-              <span className="text-xs font-mono tabular-nums tracking-tighter text-blue-400">{formatTime(state.currentTime)}</span>
+              <span className="text-xs font-mono tabular-nums tracking-tighter text-blue-400" title="Current Playhead Time">{formatTime(state.currentTime)}</span>
               <div className="flex items-center gap-6">
-                <button className="opacity-40 hover:opacity-100 transition-opacity" onClick={() => setState(s => ({...s, currentTime: Math.max(0, s.currentTime - 1)}))}><SkipBack className="h-4 w-4" /></button>
+                <button title="Step backward 1 second" className="opacity-40 hover:opacity-100 transition-opacity" onClick={() => setState(s => ({...s, currentTime: Math.max(0, s.currentTime - 1)}))}><SkipBack className="h-4 w-4" /></button>
                 <button 
                   onClick={() => setState(s => ({ ...s, isPlaying: !s.isPlaying }))}
+                  title={state.isPlaying ? "Pause (Space)" : "Play (Space)"}
                   className="flex h-10 w-10 items-center justify-center rounded-full bg-white text-black shadow-lg transition-transform active:scale-90 hover:scale-110"
                 >
                   {state.isPlaying ? <Pause className="h-5 w-5 fill-current" /> : <Play className="h-5 w-5 fill-current translate-x-0.5" />}
                 </button>
-                <button className="opacity-40 hover:opacity-100 transition-opacity" onClick={() => setState(s => ({...s, currentTime: Math.min(s.duration, s.currentTime + 1)}))}><SkipForward className="h-4 w-4" /></button>
+                <button title="Step forward 1 second" className="opacity-40 hover:opacity-100 transition-opacity" onClick={() => setState(s => ({...s, currentTime: Math.min(s.duration, s.currentTime + 1)}))}><SkipForward className="h-4 w-4" /></button>
               </div>
               <div className="flex items-center gap-3">
-                <button className={cn("opacity-40 hover:opacity-100 transition-opacity", showCropTool && "opacity-100 text-blue-500")} onClick={() => setShowCropTool(!showCropTool)}><CropIcon className="h-4 w-4" /></button>
-                <span className="text-[10px] text-gray-500 uppercase font-bold tracking-widest pl-2 border-l border-white/10">1/4 Res</span>
+                <button title="Toggle Crop Mode for selected clip" className={cn("opacity-40 hover:opacity-100 transition-opacity", showCropTool && "opacity-100 text-blue-500")} onClick={() => setShowCropTool(!showCropTool)}><CropIcon className="h-4 w-4" /></button>
+                <span className="text-[10px] text-gray-500 uppercase font-bold tracking-widest pl-2 border-l border-white/10" title="Preview Resolution Quality">1/4 Res</span>
               </div>
             </div>
           </div>
@@ -813,11 +1186,22 @@ export default function App() {
         {/* Right: Inspector (Contextual Focus) */}
         <section className="w-72 flex flex-col gap-2">
           <div className="rounded-lg border p-4 flex flex-col h-full overflow-hidden" style={{ backgroundColor: THEME.card, borderColor: THEME.border }}>
-            <div className="flex items-center gap-2 mb-6 border-b border-white/5 pb-4 shrink-0">
-              <div className="w-2 h-2 rounded-full bg-orange-500 animate-pulse"></div>
-              <h2 className="text-[11px] font-bold uppercase tracking-[0.2em] text-white">
-                {activeTab === "export" ? "APNG Optimizer" : `${activeTab.charAt(0).toUpperCase() + activeTab.slice(1)} Controls`}
-              </h2>
+            <div className="flex items-center justify-between mb-6 border-b border-white/5 pb-4 shrink-0">
+               <div className="flex items-center gap-2">
+                 <div className="w-2 h-2 rounded-full bg-orange-500 animate-pulse"></div>
+                 <h2 className="text-[11px] font-bold uppercase tracking-[0.2em] text-white" title={`Active Tab: ${activeTab}`}>
+                   {activeTab === "export" ? "APNG Optimizer" : `${activeTab.charAt(0).toUpperCase() + activeTab.slice(1)} Controls`}
+                 </h2>
+               </div>
+               {activeTab !== "export" && state.selectedClipId && (
+                 <button
+                   title={`Reset ${activeTab} settings to default`}
+                   onClick={handleResetTab}
+                   className="p-1 rounded bg-white/5 hover:bg-white/10 text-gray-400 hover:text-white transition-colors"
+                 >
+                   <RefreshCw className="h-3 w-3" />
+                 </button>
+               )}
             </div>
             
             <div className="flex-1 overflow-y-auto custom-scrollbar pr-1">
@@ -859,6 +1243,7 @@ export default function App() {
           <div className="flex gap-1.5">
             <button 
               onClick={() => handleSplit()}
+              title="Split selected track at playhead"
               className={cn(
                 "w-8 h-8 rounded bg-gray-800 flex items-center justify-center text-sm border border-white/5 hover:bg-gray-700 active:scale-95 transition-all",
                 !state.selectedClipId && "opacity-30 cursor-not-allowed"
@@ -866,11 +1251,21 @@ export default function App() {
             >
               <Scissor className="h-4 w-4" />
             </button>
-            <button className="w-8 h-8 rounded bg-blue-600 flex items-center justify-center text-sm shadow-lg shadow-blue-600/20 active:scale-90 transition-all pointer-events-none opacity-50"><Combine className="h-4 w-4" /></button>
-            <button className="w-8 h-8 rounded bg-gray-800 flex items-center justify-center text-xs font-bold border border-white/5 hover:bg-gray-700 transition-all">T</button>
+            <button 
+              title="Merge tracks (Coming soon)"
+              className="w-8 h-8 rounded bg-blue-600 flex items-center justify-center text-sm shadow-lg shadow-blue-600/20 active:scale-90 transition-all pointer-events-none opacity-50"
+            >
+              <Combine className="h-4 w-4" />
+            </button>
+            <button 
+              title="Add text track (Coming soon)"
+              className="w-8 h-8 rounded bg-gray-800 flex items-center justify-center text-xs font-bold border border-white/5 hover:bg-gray-700 transition-all cursor-not-allowed opacity-50"
+            >
+              T
+            </button>
             <button 
               onClick={() => setSnapEnabled(!snapEnabled)}
-              title="Toggle Snapping"
+              title={snapEnabled ? "Disable Sequence Snapping" : "Enable Sequence Snapping"}
               className={cn(
                 "w-8 h-8 rounded flex items-center justify-center text-sm border border-white/5 transition-all",
                 snapEnabled ? "bg-blue-600 text-white shadow-lg shadow-blue-600/20" : "bg-gray-800 text-gray-500 hover:bg-gray-700"
@@ -881,21 +1276,18 @@ export default function App() {
             <div className="w-px h-6 bg-white/5 mx-2" />
             <button 
               onClick={undo}
+              title="Undo last action"
               disabled={history.undo.length === 0}
               className="w-8 h-8 rounded bg-gray-800 flex items-center justify-center text-sm border border-white/5 hover:bg-gray-700 disabled:opacity-20 transition-all"
             >
               <History className="h-4 w-4" />
             </button>
           </div>
-          <div className="flex-1 bg-black/40 h-8 rounded-lg flex items-center px-4 gap-8 overflow-hidden font-mono text-[10px] text-gray-600 border border-white/5">
-             {Array.from({ length: Math.ceil(state.duration / 5) }).map((_, i) => (
-               <span key={i} className="shrink-0">{formatTime(i * 5)}</span>
-             ))}
-          </div>
-          <div className="flex items-center gap-3 bg-black/40 h-8 px-3 rounded-lg border border-white/5">
+          <div className="flex-1"></div>
+          <div className="flex items-center gap-3 bg-black/40 h-8 px-3 rounded-lg border border-white/5" title="Adjust the zoom level to view tracks closer">
             <span className="text-[10px] text-gray-600 font-bold uppercase tracking-widest">Zoom</span>
             <input 
-              type="range" min="50" max="300" value={state.zoomLevel}
+              type="range" min="10" max="300" value={state.zoomLevel}
               onChange={(e) => setState(s => ({ ...s, zoomLevel: parseInt(e.target.value) }))}
               className="w-24 h-1 accent-blue-600 bg-white/10 rounded-full cursor-pointer" 
             />
@@ -929,6 +1321,26 @@ export default function App() {
           </div>
           
           <div className="space-y-1.5 min-w-max">
+            {/* Timeline Ruler */}
+            <div className="relative h-6 flex items-center border-b border-white/[0.05] w-max min-w-full">
+              <div 
+                className="w-32 sticky left-0 h-full flex items-center px-4 text-[9px] uppercase font-bold text-gray-500 border-r border-white/5 bg-[#121212] z-[60] shrink-0"
+              >
+                Timecode
+              </div>
+              <div 
+                className="relative h-full" 
+                style={{ width: Math.max(3000, state.duration * state.zoomLevel) + 200 }}
+              >
+                {Array.from({ length: Math.ceil(state.duration) }).map((_, i) => (
+                  <div key={i} className="absolute top-0 flex flex-col h-full pointer-events-none" style={{ left: i * state.zoomLevel }}>
+                    <div className={cn("w-px bg-white/20 mt-auto", i % 5 === 0 ? "h-2" : "h-1")}></div>
+                    {i % 5 === 0 && <span className="absolute -top-[2px] left-1 text-[9px] text-gray-500 font-mono select-none">{formatTime(i)}</span>}
+                  </div>
+                ))}
+              </div>
+            </div>
+
             <Track 
               label="Video 1" 
               icon={<Video />} 
@@ -969,6 +1381,86 @@ export default function App() {
         </div>
       </footer>
 
+      {/* Video Export Modal */}
+      <AnimatePresence>
+        {showVideoExportModal && (
+          <motion.div 
+            initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }}
+            className="fixed inset-0 z-[100] bg-black/60 backdrop-blur-sm flex items-center justify-center p-4"
+            onClick={() => setShowVideoExportModal(false)}
+          >
+            <motion.div 
+              initial={{ scale: 0.95 }} animate={{ scale: 1 }} exit={{ scale: 0.95 }}
+              onClick={e => e.stopPropagation()}
+              className="bg-[#161616] border border-white/10 p-6 rounded-2xl w-full max-w-sm shadow-2xl relative"
+            >
+              <button 
+                onClick={() => setShowVideoExportModal(false)}
+                className="absolute top-4 right-4 text-gray-500 hover:text-white"
+                title="Close"
+              >
+                &times;
+              </button>
+              
+              <div className="flex items-center gap-3 mb-6">
+                <div className="p-2 bg-blue-500/10 rounded-lg text-blue-500">
+                  <Download className="w-5 h-5" />
+                </div>
+                <div>
+                  <h2 className="text-sm font-bold text-white uppercase tracking-widest">Export Video</h2>
+                  <p className="text-xs text-gray-500 font-mono">Render timeline to WebM</p>
+                </div>
+              </div>
+
+              <div className="space-y-5">
+                <div className="space-y-2 relative" title="Determines the final dimensions (width/height) of the exported video file.">
+                  <label className="text-[10px] font-bold text-gray-400 uppercase tracking-widest pl-1">Resolution Preset</label>
+                  <select 
+                    value={videoExportConfig.quality}
+                    onChange={(e) => setVideoExportConfig(prev => ({ ...prev, quality: e.target.value }))}
+                    className="w-full bg-[#0A0A0A] border border-white/5 rounded-lg px-3 py-2.5 text-xs text-white focus:outline-none focus:border-blue-500/50 appearance-none cursor-pointer"
+                  >
+                    <option value="4k">4K Ultra HD (3840x2160)</option>
+                    <option value="1080p">1080p Full HD (1920x1080)</option>
+                    <option value="720p">720p HD (1280x720)</option>
+                  </select>
+                </div>
+
+                <div className="space-y-2 relative" title="The number of frames rendered per second. Higher means smoother motion but a larger file size.">
+                  <label className="text-[10px] font-bold text-gray-400 uppercase tracking-widest pl-1">Framerate (FPS)</label>
+                  <select 
+                    value={videoExportConfig.fps}
+                    onChange={(e) => setVideoExportConfig(prev => ({ ...prev, fps: Number(e.target.value) }))}
+                    className="w-full bg-[#0A0A0A] border border-white/5 rounded-lg px-3 py-2.5 text-xs text-white focus:outline-none focus:border-blue-500/50 appearance-none cursor-pointer"
+                  >
+                    <option value={60}>60 FPS (Smooth)</option>
+                    <option value={30}>30 FPS (Standard)</option>
+                    <option value={24}>24 FPS (Cinematic)</option>
+                  </select>
+                </div>
+              </div>
+
+              <div className="mt-8">
+                <button
+                  onClick={handleExportVideo}
+                  disabled={state.clips.length === 0}
+                  title="Begin rendering and exporting your timeline into a WebM video file"
+                  className={cn(
+                    "w-full py-3 rounded-lg flex items-center justify-center gap-2 font-bold uppercase tracking-widest text-[11px] transition-all",
+                    state.clips.length === 0 
+                      ? "bg-gray-800 text-gray-500 cursor-not-allowed" 
+                      : "bg-blue-600 hover:bg-blue-500 text-white shadow-lg shadow-blue-500/20 active:scale-[0.98]"
+                  )}
+                >
+                  <Download className="w-4 h-4" />
+                  Start Export
+                </button>
+              </div>
+            </motion.div>
+          </motion.div>
+        )}
+      </AnimatePresence>
+
       <style dangerouslySetInnerHTML={{ __html: `
         .custom-scrollbar::-webkit-scrollbar { height: 6px; width: 6px; }
         .custom-scrollbar::-webkit-scrollbar-track { background: transparent; }
@@ -982,14 +1474,17 @@ export default function App() {
 
 function Track({ label, icon, clips, zoom, onSeek, onSelect, onMove, onTrim, selectedId, onContextMenu }: any) {
   return (
-    <div className="relative h-12 flex items-center bg-white/[0.02] rounded-lg border border-white/[0.03] w-max min-w-full">
-      <div className="w-32 sticky left-0 h-full flex items-center px-4 text-[10px] uppercase font-bold text-gray-500 border-r border-white/5 bg-[#121212] z-[60] shrink-0">
+    <div className="relative h-14 flex bg-white/[0.02] border-b border-white/[0.05] min-w-max group overflow-hidden">
+      <div 
+        className="w-32 sticky left-0 h-full flex items-center px-4 text-[10px] uppercase font-bold text-gray-500 border-r border-white/10 bg-[#0A0A0A] z-[60] shrink-0 shadow-[4px_0_10px_rgba(0,0,0,0.5)]"
+        title={`Timeline track: ${label}`}
+      >
         <div className="flex items-center gap-2">
-          {React.cloneElement(icon, { size: 12, className: "opacity-40" })}
+          {React.cloneElement(icon, { size: 14, className: "opacity-40" })}
           <span className="tracking-widest">{label}</span>
         </div>
       </div>
-      <div className="flex-1 relative h-full min-w-[3000px]">
+      <div className="relative flex-1 min-w-[5000px] h-full p-1.5">
         {clips?.map((c: any) => (
           <motion.div 
             key={`${c.id}-${c.startTime}`}
@@ -1004,23 +1499,41 @@ function Track({ label, icon, clips, zoom, onSeek, onSelect, onMove, onTrim, sel
             }}
             onContextMenu={(e) => onContextMenu(e, c.id)}
             className={cn(
-              "absolute h-10 top-1 rounded-md border flex items-start pt-1 px-1 cursor-grab overflow-hidden active:cursor-grabbing shadow-lg group/clip transition-all duration-200",
-              selectedId === c.id ? "ring-2 ring-white/50 z-20 scale-[1.02]" : "z-10",
-              label === "Video 1" ? (selectedId === c.id ? "bg-blue-500 border-blue-300 shadow-[0_0_15px_rgba(59,130,246,0.5)]" : "bg-blue-600/30 border-blue-500/50 hover:bg-blue-600/40") :
-              label === "Overlay" ? (selectedId === c.id ? "bg-purple-500 border-purple-300 shadow-[0_0_15px_rgba(168,85,247,0.5)]" : "bg-purple-600/30 border-purple-500/50 hover:bg-purple-600/40") :
-              (selectedId === c.id ? "bg-emerald-500 border-emerald-300 shadow-[0_0_15px_rgba(16,185,129,0.5)]" : "bg-emerald-600/30 border-emerald-500/50 hover:bg-emerald-600/40")
+              "absolute h-10 top-2 rounded-md border flex items-start pt-1 px-1 cursor-grab overflow-hidden active:cursor-grabbing shadow-lg group/clip text-white transition-all",
+              selectedId === c.id ? "ring-2 ring-white/50 z-20 scale-[1.02] shadow-2xl" : "z-10",
+              label === "Video 1" ? (selectedId === c.id ? "bg-blue-500/40 border-blue-300 shadow-[0_0_20px_rgba(59,130,246,0.3)]" : "bg-blue-500/10 border-blue-500/30 hover:bg-blue-500/20") :
+              label === "Overlay" ? (selectedId === c.id ? "bg-purple-500/40 border-purple-300 shadow-[0_0_20px_rgba(168,85,247,0.3)]" : "bg-purple-500/10 border-purple-500/30 hover:bg-purple-500/20") :
+              (selectedId === c.id ? "bg-emerald-500/40 border-emerald-300 shadow-[0_0_20px_rgba(16,185,129,0.3)]" : "bg-emerald-600/10 border-emerald-500/30 hover:bg-emerald-600/20")
             )}
             style={{ left: c.startTime * zoom, width: (c.duration) * zoom }}
             onClick={(e) => {
               e.stopPropagation();
               onSelect(c.id);
             }}
+            title={`Clip: ${c.name} \nDuration: ${formatTime(c.duration)}`}
           >
+            {/* Frame by Frame / Filmstrip */}
+            {c.type === 'video' && (
+              <Filmstrip 
+                url={c.url} 
+                duration={c.duration} 
+                zoom={zoom} 
+                sourceStart={c.sourceStart} 
+                sourceEnd={c.sourceEnd} 
+              />
+            )}
+            
+            {/* Label Overlay */}
+            <div className="absolute inset-x-0 bottom-0 top-auto flex items-center p-1 bg-black/40 pointer-events-none z-10">
+              <span className="text-[8px] font-bold truncate opacity-80 uppercase tracking-tighter">{c.name}</span>
+            </div>
+
             {/* Trim Handles */}
             {selectedId === c.id && (
               <>
                 <div 
                   className="absolute left-0 top-0 bottom-0 w-2 hover:bg-white/20 cursor-ew-resize z-30"
+                  title="Trim Clip Start"
                   onMouseDown={(e) => {
                     e.stopPropagation();
                     const startX = e.clientX;
@@ -1038,6 +1551,7 @@ function Track({ label, icon, clips, zoom, onSeek, onSelect, onMove, onTrim, sel
                 />
                 <div 
                   className="absolute right-0 top-0 bottom-0 w-2 hover:bg-white/20 cursor-ew-resize z-30"
+                  title="Trim Clip End"
                   onMouseDown={(e) => {
                     e.stopPropagation();
                     const startX = e.clientX;
@@ -1076,10 +1590,11 @@ function Track({ label, icon, clips, zoom, onSeek, onSelect, onMove, onTrim, sel
   );
 }
 
-function ContextItem({ label, icon, onClick, danger, disabled }: any) {
+function ContextItem({ label, tooltip, icon, onClick, danger, disabled }: any) {
   return (
     <button 
       disabled={disabled}
+      title={tooltip || label}
       onClick={(e) => { e.stopPropagation(); onClick(); }}
       className={cn(
         "w-full flex items-center gap-2.5 px-3 py-2 text-[11px] uppercase font-bold tracking-widest rounded-md transition-all active:scale-95",
