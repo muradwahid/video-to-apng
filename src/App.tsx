@@ -3,7 +3,8 @@ import {
   Play, Pause, SkipBack, SkipForward, Scissors as Scissor, Combine, 
   Crop as CropIcon, Layers, Download, Plus, Video, Music,
   Settings, History, Maximize2, Trash2, Sliders, Image as ImageIcon,
-  Monitor, Info, Zap, RefreshCw
+  Monitor, Info, Zap, RefreshCw, Volume2, Loader2,
+  Palette, Grid, ArrowRightLeft, LayoutTemplate, Sparkles, Wand2
 } from "lucide-react";
 import { motion, AnimatePresence } from "motion/react";
 import { cn, formatTime } from "@/src/lib/utils";
@@ -12,9 +13,16 @@ import { VideoCanvas } from "@/src/components/VideoCanvas";
 import { CropTool } from "@/src/components/CropTool";
 import { APNGConverter } from "@/src/components/APNGConverter";
 import { PropertyInspector } from "@/src/components/PropertyInspector";
+import { renderBackground, renderClip, renderClipWithTransition } from "@/src/lib/renderer";
+import { BackgroundPanel } from "@/src/components/BackgroundPanel";
+import { TransitionPanel } from "@/src/components/TransitionPanel";
+import { TemplatePanel } from "@/src/components/TemplatePanel";
 import { Filmstrip } from "@/src/components/Filmstrip";
+import { AudioWaveform } from "@/src/components/AudioWaveform";
+import { audioEngine } from "@/src/services/audioEngine";
 import UPNG from "upng-js";
 import pako from "pako";
+import * as WebMMuxer from 'webm-muxer';
 
 // @ts-ignore
 window.pako = pako;
@@ -42,7 +50,15 @@ export default function App() {
     duration: 30, // Default 30s timeline
     isPlaying: false,
     selectedClipId: null,
-    zoomLevel: 100 // pixels per second
+    zoomLevel: 100, // pixels per second
+    background: {
+      type: 'solid',
+      color: '#000000',
+      opacity: 1,
+      blurIntensity: 0,
+      fit: 'cover'
+    },
+    transitions: []
   });
 
   const fileInputRef = useRef<HTMLInputElement>(null);
@@ -54,10 +70,24 @@ export default function App() {
   const [snapEnabled, setSnapEnabled] = useState(true);
 
   const [showVideoExportModal, setShowVideoExportModal] = useState(false);
-  const [videoExportConfig, setVideoExportConfig] = useState({ quality: '1080p', fps: 60 });
+  const [videoExportConfig, setVideoExportConfig] = useState({ quality: '1080p', fps: 0 });
+  const [exportMimeType, setExportMimeType] = useState('video/webm');
+
+  // Find supported mime type on mount
+  useEffect(() => {
+    const types = ["video/webm;codecs=vp9", "video/webm;codecs=vp8", "video/webm"];
+    for (const t of types) {
+      if (MediaRecorder.isTypeSupported(t)) {
+        setExportMimeType(t);
+        break;
+      }
+    }
+  }, []);
 
   const requestRef = useRef<number | null>(null);
   const lastTimeRef = useRef<number>(0);
+
+  const [sidebarTab, setSidebarTab] = useState<"assets" | "templates" | "background" | "transitions">("assets");
 
   const [history, setHistory] = useState<{ undo: any[], redo: any[] }>({ undo: [], redo: [] });
 
@@ -316,8 +346,39 @@ export default function App() {
     };
   }, [animate]);
 
+  useEffect(() => {
+    if (state.isPlaying) {
+      audioEngine.resume();
+      state.clips.forEach(clip => {
+        if (clip.type === 'video' || clip.type === 'audio') {
+          audioEngine.playClip(clip, state.currentTime, true);
+        }
+      });
+    } else {
+      audioEngine.stopAll();
+    }
+  }, [state.isPlaying]);
+
+  // Sync audio if currentTime changes manually (scrubbing)
+  useEffect(() => {
+    if (!state.isPlaying) {
+      audioEngine.stopAll();
+    }
+  }, [state.currentTime]);
+
   const handleExportVideo = async () => {
     if (state.clips.length === 0) return;
+    
+    // Check for WebCodecs support
+    if (!window.VideoEncoder) {
+      alert("Your browser does not support WebCodecs. Please use the latest version of Chrome or Edge.");
+      return;
+    }
+    
+    // Stop playback and audio engine to prevent background interference
+    setState(prev => ({ ...prev, isPlaying: false }));
+    audioEngine.stopAll();
+    
     setIsProcessing(true);
     setProgress(0);
     setShowVideoExportModal(false);
@@ -332,157 +393,199 @@ export default function App() {
       const res = resolutionMap[videoExportConfig.quality.toLowerCase()] || resolutionMap['1080p'];
       const width = res.w;
       const height = res.h;
-      const fps = videoExportConfig.fps;
+      // Handle '0' as Auto/Default FPS (setting to 60 for high quality default)
+      const fps = videoExportConfig.fps === 0 ? 60 : videoExportConfig.fps;
 
-      const minStartTime = Math.min(...state.clips.map(c => c.startTime));
-      const maxEndTime = Math.max(...state.clips.map(c => c.startTime + c.duration));
+      const minStartTime = state.clips.length > 0 ? Math.min(...state.clips.map(c => c.startTime)) : 0;
+      const maxEndTime = state.clips.length > 0 ? Math.max(...state.clips.map(c => c.startTime + c.duration)) : 0;
       const durationSeconds = maxEndTime - minStartTime;
       const totalFrames = Math.ceil(durationSeconds * fps);
+
+      if (totalFrames <= 0) throw new Error("Timeline is empty or invalid duration");
 
       const canvas = document.createElement('canvas');
       canvas.width = width;
       canvas.height = height;
-      const ctx = canvas.getContext('2d');
+      const ctx = canvas.getContext('2d', { alpha: false, desynchronized: true });
       if (!ctx) throw new Error("Could not get 2d context");
 
       // Preload media
-      const mediaElements: Record<string, any> = {};
+      const mediaElements: Record<string, HTMLVideoElement | HTMLImageElement> = {};
+      const uniqueUrls = Array.from(new Set(state.clips.map(c => c.url)));
+      const uniqueMedia = uniqueUrls.map(url => {
+        const clip = state.clips.find(c => c.url === url)!;
+        return { url: clip.url, type: clip.type, name: clip.name };
+      });
       
-      await Promise.all(state.clips.map(async (clip) => {
-        if (mediaElements[clip.url]) return;
+      if (state.background.mediaUrl) {
+        uniqueMedia.push({ 
+          url: state.background.mediaUrl, 
+          type: state.background.type === 'video' ? 'video' : 'image',
+          name: 'Background'
+        });
+      }
+
+      await Promise.all(uniqueMedia.map(async (item) => {
+        if (mediaElements[item.url]) return;
         return new Promise<void>((resolve, reject) => {
-          if (clip.type === 'video') {
+          if (item.type === 'video') {
             const vid = document.createElement('video');
-            vid.src = clip.url;
+            vid.src = item.url;
             vid.crossOrigin = "anonymous";
             vid.muted = true;
             vid.preload = "auto";
-            vid.onloadeddata = () => { mediaElements[clip.url] = vid; resolve(); };
-            vid.onerror = reject;
-          } else if (clip.type === 'image') {
+            vid.onloadeddata = () => { mediaElements[item.url] = vid; resolve(); };
+            vid.onerror = () => reject(new Error(`Failed to load video: ${item.name}`));
+            setTimeout(() => { if (!mediaElements[item.url]) reject(new Error(`Timeout loading: ${item.name}`)); }, 15000);
+          } else if (item.type === 'image') {
             const img = new Image();
-            img.src = clip.url;
+            img.src = item.url;
             img.crossOrigin = "anonymous";
-            img.onload = () => { mediaElements[clip.url] = img; resolve(); };
-            img.onerror = reject;
+            img.onload = () => { mediaElements[item.url] = img; resolve(); };
+            img.onerror = () => reject(new Error(`Failed to load image: ${item.name}`));
           } else {
             resolve();
           }
         });
       }));
 
-      const stream = canvas.captureStream(0);
-      const track = stream.getVideoTracks()[0] as any;
-      const mediaRecorder = new MediaRecorder(stream, { mimeType: 'video/webm' });
-      const recordedChunks: Blob[] = [];
-      
-      mediaRecorder.ondataavailable = e => {
-        if (e.data.size > 0) recordedChunks.push(e.data);
-      };
-      
-      const recordingPromise = new Promise<void>(resolve => {
-        mediaRecorder.onstop = () => resolve();
+      // Set up Muxer and Encoder
+      const muxer = new WebMMuxer.Muxer({
+        target: new WebMMuxer.ArrayBufferTarget(),
+        video: {
+          codec: 'V_VP9',
+          width,
+          height,
+          frameRate: fps
+        }
       });
-      
-      mediaRecorder.start();
+
+      const videoEncoder = new VideoEncoder({
+        output: (chunk, metadata) => muxer.addVideoChunk(chunk, metadata),
+        error: (e) => console.error("WebCodecs Encoding Error:", e)
+      });
+
+      videoEncoder.configure({
+        codec: 'vp09.00.10.08',
+        width,
+        height,
+        bitrate: videoExportConfig.quality === '4k' ? 40000000 : 12000000,
+      });
+
+      // Seeking helper
+      const seekVideo = async (video: HTMLVideoElement, targetTime: number) => {
+        if (Math.abs(video.currentTime - targetTime) < 0.01) return;
+        
+        return new Promise<void>((resolve) => {
+          let resolved = false;
+          const onSeeked = () => {
+            if (resolved) return;
+            resolved = true;
+            video.removeEventListener('seeked', onSeeked);
+            resolve();
+          };
+          video.addEventListener('seeked', onSeeked);
+          
+          try {
+            video.currentTime = targetTime;
+          } catch (e) {
+            resolved = true;
+            resolve();
+            return;
+          }
+
+          setTimeout(() => {
+            if (!resolved) {
+              resolved = true;
+              video.removeEventListener('seeked', onSeeked);
+              resolve();
+            }
+          }, 150); 
+        });
+      };
 
       for (let i = 0; i < totalFrames; i++) {
         const absoluteTime = minStartTime + (i / fps);
         
-        ctx.fillStyle = "#000000";
+        ctx.fillStyle = '#000000';
         ctx.fillRect(0, 0, width, height);
-
-        const activeClips = state.clips.filter(c => absoluteTime >= c.startTime && absoluteTime < c.startTime + c.duration);
         
-        for (const clip of activeClips) {
-          ctx.save();
-          // We handle transform/rotation, but for proper crop math, we need to map correctly.
-          // Crop operates on the UNTRANSFORMED media bounds.
-          ctx.translate(width / 2, height / 2);
-          ctx.rotate((clip.transform.rotation || 0) * Math.PI / 180);
-          ctx.scale(clip.transform.scale || 1, clip.transform.scale || 1);
-          ctx.translate(-width / 2, -height / 2);
+        renderBackground(ctx, width, height, state.background, mediaElements, absoluteTime);
 
-          const media = mediaElements[clip.url];
+        const activeTransition = state.transitions.find(t => {
+          const fromClip = state.clips.find(c => c.id === t.fromClipId);
+          if (!fromClip) return false;
+          const junction = fromClip.startTime + fromClip.duration;
+          return absoluteTime >= junction - t.duration / 2 && absoluteTime <= junction + t.duration / 2;
+        });
+
+        if (activeTransition) {
+          const fromClip = state.clips.find(c => c.id === activeTransition.fromClipId)!;
+          const toClip = state.clips.find(c => c.id === activeTransition.toClipId)!;
+          const junction = fromClip.startTime + fromClip.duration;
+          const progress = (absoluteTime - (junction - activeTransition.duration / 2)) / activeTransition.duration;
+
+          await Promise.all([fromClip, toClip].map(async (clip) => {
+            const media = mediaElements[clip.url];
+            if (clip.type === 'video' && media instanceof HTMLVideoElement) {
+              const relativeTime = (absoluteTime - clip.startTime) * (clip.speed || 1) + clip.sourceStart;
+              await seekVideo(media, Math.min(relativeTime, media.duration - 0.05));
+            }
+          }));
+
+          renderClipWithTransition(ctx, width, height, fromClip, toClip, activeTransition.type, progress, mediaElements);
+        } else {
+          const activeClips = state.clips
+            .filter(c => absoluteTime >= c.startTime && absoluteTime < (c.startTime + c.duration))
+            .sort((a, b) => (a.layer || 0) - (b.layer || 0));
           
-          if (clip.filters) {
-            const f = clip.filters;
-            ctx.filter = `brightness(${f.brightness}) contrast(${f.contrast}) saturate(${f.saturation}) blur(${f.blur}px) grayscale(${f.grayscale}) sepia(${f.sepia}) invert(${f.invert})`;
-          } else {
-            ctx.filter = 'none';
-          }
-
-          if (clip.type === 'video' && media instanceof HTMLVideoElement) {
-            const relativeTime = (absoluteTime - clip.startTime) * clip.speed + clip.sourceStart;
-            media.currentTime = relativeTime;
-            
-            await new Promise(resolve => {
-              const onSeeked = () => {
-                media.removeEventListener('seeked', onSeeked);
-                resolve(null);
-              };
-              media.addEventListener('seeked', onSeeked);
-            });
-
-            if (clip.transform.crop) {
-              const { x, y, width: cw, height: ch } = clip.transform.crop;
-              ctx.drawImage(
-                media, 
-                x * media.videoWidth, y * media.videoHeight, cw * media.videoWidth, ch * media.videoHeight, 
-                x * width, y * height, cw * width, ch * height
-              );
-            } else {
-              ctx.drawImage(media, 0, 0, width, height);
+          for (const clip of activeClips) {
+            const media = mediaElements[clip.url];
+            if (clip.type === 'video' && media instanceof HTMLVideoElement) {
+              const relativeTime = (absoluteTime - clip.startTime) * (clip.speed || 1) + clip.sourceStart;
+              await seekVideo(media, Math.min(relativeTime, media.duration - 0.05));
             }
-
-            if (clip.filters) {
-              const f = clip.filters;
-              if (f.vignette > 0) {
-                const gradient = ctx.createRadialGradient(width/2, height/2, 0, width/2, height/2, width * 0.8);
-                gradient.addColorStop(0, 'rgba(0,0,0,0)');
-                gradient.addColorStop(1, `rgba(0,0,0,${f.vignette})`);
-                ctx.fillStyle = gradient;
-                ctx.fillRect(0, 0, width, height);
-              }
-              if (f.grain > 0) {
-                 ctx.fillStyle = `rgba(255,255,255,0.05)`;
-                 for (let j = 0; j < 500 * f.grain; j++) {
-                   ctx.fillRect(Math.random() * width, Math.random() * height, 1, 1);
-                 }
-              }
-            }
-          } else if (clip.type === 'image' && media instanceof HTMLImageElement) {
-            ctx.drawImage(media, 0, 0, width, height);
+            renderClip(ctx, width, height, clip, mediaElements);
           }
-          ctx.restore();
         }
         
-        if (track && track.requestFrame) track.requestFrame();
-        await new Promise(r => setTimeout(r, 10));
-        setProgress((i + 1) / totalFrames);
+        const frame = new VideoFrame(canvas, { timestamp: Math.round((i * 1000000) / fps) });
+        videoEncoder.encode(frame);
+        frame.close();
+        
+        if (i % 10 === 0) {
+          await new Promise(r => setTimeout(r, 0));
+          setProgress((i + 1) / totalFrames);
+        }
       }
 
-      mediaRecorder.stop();
-      await recordingPromise;
+      await videoEncoder.flush();
+      videoEncoder.close();
+      muxer.finalize();
 
-      const blob = new Blob(recordedChunks, { type: 'video/webm' });
+      const buffer = (muxer.target as WebMMuxer.ArrayBufferTarget).buffer;
+      const blob = new Blob([buffer], { type: 'video/webm' });
       const url = URL.createObjectURL(blob);
       const a = document.createElement('a');
       a.href = url;
-      a.download = `lumina_export_${Date.now()}.webm`;
+      a.download = `video_export_${Date.now()}.webm`;
+      document.body.appendChild(a);
       a.click();
-      URL.revokeObjectURL(url);
+      document.body.removeChild(a);
+      setTimeout(() => URL.revokeObjectURL(url), 1000);
 
+      // Cleanup
       Object.values(mediaElements).forEach(m => {
         if (m instanceof HTMLVideoElement) {
           m.pause();
           m.src = "";
           m.load();
+          m.remove();
         }
       });
     } catch (error) {
-      console.error("Video Export Failed:", error);
-      alert("Failed to export video. See console for details.");
+      console.error("Export Error:", error);
+      alert(`Export failed: ${error instanceof Error ? error.message : "Details in console"}`);
     } finally {
       setIsProcessing(false);
       setProgress(0);
@@ -536,7 +639,7 @@ export default function App() {
       const urls = Array.from(new Set(state.clips.map(c => c.url)));
       const mediaElements: { [url: string]: HTMLVideoElement | HTMLImageElement } = {};
       
-      await Promise.all(urls.map(url => {
+      await Promise.all(urls.map((url: string) => {
         const clip = state.clips.find(c => c.url === url);
         return new Promise((resolve, reject) => {
           if (clip?.type === 'video') {
@@ -713,9 +816,16 @@ export default function App() {
       const type = file.type.startsWith('video') ? 'video' : file.type.startsWith('audio') ? 'audio' : 'image';
       const url = URL.createObjectURL(file);
       let duration = 5; // default for images
+      let waveform: number[] | undefined;
       
       if (type === 'video' || type === 'audio') {
         duration = await getMediaDuration(url, type);
+        try {
+          const buffer = await audioEngine.loadAudio(url, file.name);
+          waveform = audioEngine.getWaveform(buffer);
+        } catch (e) {
+          console.warn("Waveform extraction failed:", e);
+        }
       }
 
       return {
@@ -724,7 +834,8 @@ export default function App() {
         url,
         type,
         size: file.size,
-        duration
+        duration,
+        audioWaveform: waveform
       } as MediaAsset;
     });
 
@@ -746,7 +857,39 @@ export default function App() {
     pushToHistory(state);
     e.preventDefault();
     setDragOver(false);
+    
+    const transitionType = e.dataTransfer.getData("application/transition-type");
     const assetData = e.dataTransfer.getData("asset");
+
+    if (transitionType && timelineRef.current) {
+      const rect = timelineRef.current.getBoundingClientRect();
+      const x = e.clientX - rect.left - 128 - 8;
+      const dropTime = Math.max(0, x / state.zoomLevel);
+      
+      // Find clips that are adjacent or overlapping at the drop point
+      // We look for a junction point (end of one, start of another)
+      const fromClip = state.clips.find(c => Math.abs((c.startTime + c.duration) - dropTime) < 0.5);
+      const toClip = state.clips.find(c => Math.abs(c.startTime - dropTime) < 0.5);
+      
+      if (fromClip && toClip && fromClip.id !== toClip.id) {
+        // Remove any existing transition between these two clips
+        const filteredTransitions = state.transitions.filter(t => 
+          !(t.fromClipId === fromClip.id && t.toClipId === toClip.id)
+        );
+
+        const newTransition: any = {
+          id: Math.random().toString(36).substr(2, 9),
+          type: transitionType,
+          duration: 0.5, // Pro standard: 0.5s default
+          fromClipId: fromClip.id,
+          toClipId: toClip.id,
+          easing: 'ease-in-out'
+        };
+        setState(prev => ({ ...prev, transitions: [...filteredTransitions, newTransition] }));
+      }
+      return;
+    }
+
     if (!assetData || !timelineRef.current) return;
 
     const asset: MediaAsset = JSON.parse(assetData);
@@ -755,7 +898,7 @@ export default function App() {
     const y = e.clientY - rect.top - 8;
     
     const startTime = Math.max(0, x / state.zoomLevel);
-    const trackIndex = Math.max(0, Math.min(2, Math.floor(y / 50))); // Roughly 50px per track including spacing
+    const trackIndex = Math.max(0, Math.min(3, Math.floor(y / 50))); // Roughly 50px per track including spacing
 
     const newClip: VideoClip = {
       id: Math.random().toString(36).substr(2, 9),
@@ -769,7 +912,14 @@ export default function App() {
       trackIndex: trackIndex,
       volume: 1,
       speed: 1,
-      transform: { scale: 1, rotation: 0 }
+      transform: { scale: 1, rotation: 0 },
+      audio: {
+        volume: 1,
+        fadeIn: 0,
+        fadeOut: 0,
+        muted: false,
+        waveform: asset.audioWaveform
+      }
     };
 
     setState(prev => ({
@@ -797,6 +947,114 @@ export default function App() {
   const timelineRef = useRef<HTMLDivElement>(null);
 
   const [contextMenu, setContextMenu] = useState<{ x: number, y: number, show: boolean, targetId?: string } | null>(null);
+
+  const applyTemplate = (templateId: string) => {
+    pushToHistory(state);
+    
+    interface TemplateType {
+      id: string;
+      name: string;
+      category: string;
+      thumbnail: string;
+      structure: {
+        background: any;
+        clips: any[];
+        transitions?: any[];
+      };
+    }
+
+    const templateLibrary: Record<string, TemplateType> = {
+      'youtube-outro': {
+        id: 'youtube-outro',
+        name: 'YouTube Outro',
+        category: 'social',
+        thumbnail: '',
+        structure: {
+          background: { type: 'gradient', gradient: { from: '#0f0c29', to: '#302b63', angle: 45 }, fit: 'cover', overlayOpacity: 0.1, overlayColor: '#000000' },
+          clips: [
+            { id: 'placeholder-1', name: 'Insert Video Here', url: '', type: 'video', duration: 10, startTime: 0, sourceStart: 0, sourceEnd: 10, trackIndex: 0, volume: 1, speed: 1, transform: { scale: 0.8, rotation: 0 }, audio: { volume: 1, muted: false, fadeIn: 0.5, fadeOut: 0.5 } }
+          ],
+          transitions: []
+        }
+      },
+      'cinematic-story': {
+        id: 'cinematic-story',
+        name: 'Cinematic Story',
+        category: 'marketing',
+        thumbnail: '',
+        structure: {
+          background: { type: 'solid', color: '#000000', fit: 'cover' },
+          clips: [
+             { id: 'sc-1', name: 'Scene 1', url: 'https://images.unsplash.com/photo-1492144534655-ae79c964c9d7?auto=format&fit=crop&q=60&w=800', type: 'image', duration: 3, startTime: 0, sourceStart: 0, sourceEnd: 3, trackIndex: 0, volume: 1, speed: 1, transform: { scale: 1, rotation: 0 }, audio: { volume: 1, muted: false, fadeIn: 0.5, fadeOut: 0.5 } },
+             { id: 'sc-2', name: 'Scene 2', url: 'https://images.unsplash.com/photo-1549241520-425e3dfc01cd?auto=format&fit=crop&q=60&w=800', type: 'image', duration: 3, startTime: 3, sourceStart: 0, sourceEnd: 3, trackIndex: 0, volume: 1, speed: 1, transform: { scale: 1, rotation: 0 }, audio: { volume: 1, muted: false, fadeIn: 0.5, fadeOut: 0.5 } }
+          ],
+          transitions: [
+             { id: 'tr-1', type: 'fade', duration: 1, fromClipId: 'sc-1', toClipId: 'sc-2', easing: 'linear' }
+          ]
+        }
+      }
+    };
+
+    const template = templateLibrary[templateId];
+    if (template) {
+       setState(prev => ({
+         ...prev,
+         background: template.structure.background,
+         clips: template.structure.clips,
+         transitions: template.structure.transitions || [],
+         duration: 30,
+         selectedClipId: null
+       }));
+    }
+  };
+
+  const handleAutoSyncTransitions = () => {
+    pushToHistory(state);
+    
+    // Sort clips on track 0 by start time
+    const track0Clips = [...state.clips]
+      .filter(c => c.trackIndex === 0)
+      .sort((a, b) => a.startTime - b.startTime);
+    
+    if (track0Clips.length < 2) return;
+    
+    const newTransitions: any[] = [...state.transitions];
+    let addedCount = 0;
+    
+    const types = ['cross-dissolve', 'fade', 'blur', 'glitch', 'wipe', 'iris', 'rotate', 'spiral'];
+    
+    for (let i = 0; i < track0Clips.length - 1; i++) {
+       const current = track0Clips[i];
+       const next = track0Clips[i+1];
+       const junction = current.startTime + current.duration;
+       
+       // Detect gaps or junctions (within 1s)
+       if (Math.abs(junction - next.startTime) < 1.0) {
+          // Check if a transition already exists between these two
+          const exists = newTransitions.find(t => 
+            (t.fromClipId === current.id && t.toClipId === next.id) ||
+            (t.fromClipId === next.id && t.toClipId === current.id)
+          );
+          
+          if (!exists) {
+             const randomType = types[Math.floor(Math.random() * types.length)];
+             newTransitions.push({
+               id: Math.random().toString(36).substr(2, 9),
+               type: randomType,
+               duration: 0.8,
+               fromClipId: current.id,
+               toClipId: next.id,
+               easing: 'ease-in-out'
+             });
+             addedCount++;
+          }
+       }
+    }
+    
+    if (addedCount > 0) {
+       setState(prev => ({ ...prev, transitions: newTransitions }));
+    }
+  };
 
   const handleApplyCrop = (crop: { x: number, y: number, width: number, height: number }) => {
     if (!state.selectedClipId) return;
@@ -845,16 +1103,16 @@ export default function App() {
     setShowCropTool(false);
   };
 
-  const handleContextMenu = useCallback((e: React.MouseEvent, targetId?: string) => {
+  const handleContextMenu = useCallback((e: React.MouseEvent, targetId?: string, type: 'clip' | 'transition' = 'clip') => {
     e.preventDefault();
     e.stopPropagation();
     
     // Automatically select the clip on right-click for visual feedback
-    if (targetId) {
+    if (targetId && type === 'clip') {
       setState(prev => ({ ...prev, selectedClipId: targetId }));
     }
     
-    setContextMenu({ x: e.clientX, y: e.clientY, show: true, targetId });
+    setContextMenu({ x: e.clientX, y: e.clientY, show: true, targetId, type } as any);
   }, []);
 
   const updateClipDuration = (id: string, delta: number, edge: 'start' | 'end') => {
@@ -924,9 +1182,16 @@ export default function App() {
         const type = file.type.startsWith('video') ? 'video' : file.type.startsWith('audio') ? 'audio' : 'image';
         const url = URL.createObjectURL(file);
         let duration = 5; // default for images
+        let waveform: number[] | undefined;
         
         if (type === 'video' || type === 'audio') {
           duration = await getMediaDuration(url, type);
+          try {
+            const buffer = await audioEngine.loadAudio(url, file.name);
+            waveform = audioEngine.getWaveform(buffer);
+          } catch (e) {
+            console.warn("Waveform extraction failed:", e);
+          }
         }
 
         return {
@@ -935,7 +1200,8 @@ export default function App() {
           url,
           type,
           size: file.size,
-          duration
+          duration,
+          audioWaveform: waveform
         } as MediaAsset;
       });
 
@@ -996,18 +1262,58 @@ export default function App() {
             className="fixed z-50 bg-[#1A1A1A] border border-white/10 rounded-lg shadow-2xl p-1 min-w-[140px]"
             style={{ left: contextMenu.x, top: contextMenu.y }}
           >
-            {contextMenu.targetId ? (
+            {(contextMenu as any).type === 'transition' ? (
+               <ContextItem 
+                 label="Remove Transition" 
+                 tooltip="Delete this transition effect" 
+                 icon={<Trash2 size={12}/>} 
+                 onClick={() => {
+                   pushToHistory(state);
+                   setState(prev => ({
+                     ...prev,
+                     transitions: prev.transitions.filter(t => t.id !== contextMenu.targetId)
+                   }));
+                   setContextMenu(prev => prev ? { ...prev, show: false } : null);
+                 }} 
+                 danger 
+               />
+            ) : contextMenu.targetId ? (
+                <>
+                 <ContextItem label="Split at playhead" tooltip="Split this clip precisely at the current playhead position" icon={<Scissor size={12}/>} onClick={() => { handleSplit(contextMenu.targetId); setContextMenu(prev => prev ? { ...prev, show: false } : null); }} />
+                 <ContextItem 
+                   label={state.clips.find(c => c.id === contextMenu.targetId)?.audio?.muted ? "Unmute Clip" : "Mute Clip"} 
+                   tooltip="Toggle audio for this clip" 
+                   icon={<Volume2 size={12}/>} 
+                   onClick={() => {
+                     const targetId = contextMenu.targetId;
+                     setState(prev => {
+                       const newClips = prev.clips.map(c => {
+                         if (c.id !== targetId) return c;
+                         const newClip = {
+                           ...c,
+                           audio: {
+                             ...(c.audio || {}),
+                             volume: 1, fadeIn: 0, fadeOut: 0, 
+                             muted: !(c.audio?.muted ?? false)
+                           }
+                         };
+                         audioEngine.updateClipAudio(newClip);
+                         return newClip;
+                       });
+                       return { ...prev, clips: newClips };
+                     });
+                     setContextMenu(prev => prev ? { ...prev, show: false } : null);
+                   }} 
+                 />
+                 <ContextItem label="Delete Clip" tooltip="Remove this clip from the timeline" icon={<Trash2 size={12}/>} onClick={() => { removeClip(contextMenu.targetId); setContextMenu(prev => prev ? { ...prev, show: false } : null); }} danger />
+                </>
+             ) : (
                <>
-                <ContextItem label="Split at playhead" tooltip="Split this clip precisely at the current playhead position" icon={<Scissor size={12}/>} onClick={() => handleSplit(contextMenu.targetId)} />
-                <ContextItem label="Delete Clip" tooltip="Remove this clip from the timeline" icon={<Trash2 size={12}/>} onClick={() => removeClip(contextMenu.targetId)} danger />
+                 <ContextItem label="Add Media" tooltip="Import new media to project" icon={<Plus size={12}/>} onClick={() => { fileInputRef.current?.click(); setContextMenu(prev => prev ? { ...prev, show: false } : null); }} />
+                 <ContextItem label="Split Selected" tooltip="Split the currently selected clip at the playhead" icon={<Scissor size={12}/>} onClick={() => { handleSplit(); setContextMenu(prev => prev ? { ...prev, show: false } : null); }} disabled={!state.selectedClipId} />
+                 <ContextItem label="Clear Project" tooltip="Remove all assets and reset the project" icon={<Trash2 size={12}/>} onClick={() => { clearAssets(); setContextMenu(prev => prev ? { ...prev, show: false } : null); }} danger />
                </>
-            ) : (
-              <>
-                <ContextItem label="Add Media" tooltip="Import new media to project" icon={<Plus size={12}/>} onClick={() => fileInputRef.current?.click()} />
-                <ContextItem label="Split Selected" tooltip="Split the currently selected clip at the playhead" icon={<Scissor size={12}/>} onClick={() => handleSplit()} disabled={!state.selectedClipId} />
-                <ContextItem label="Clear Project" tooltip="Remove all assets and reset the project" icon={<Trash2 size={12}/>} onClick={clearAssets} danger />
-              </>
-            )}
+             )}
           </motion.div>
         )}
       </AnimatePresence>
@@ -1057,56 +1363,140 @@ export default function App() {
                 <span className="text-[11px] font-bold uppercase tracking-widest text-blue-400">Drop files here</span>
               </div>
             )}
-            <div className="flex items-center justify-between mb-3 z-10">
-              <h3 className="text-[10px] font-bold text-gray-500 uppercase tracking-widest" title="Manager for imported media files">Media Assets</h3>
+            
+            {/* Sidebar Controls */}
+            <div className="flex bg-black/60 p-1 mb-4 rounded-lg border border-white/5 gap-0.5">
               <button 
-                onClick={() => fileInputRef.current?.click()}
-                title="Import new media files (Images, Video, Audio) or drag and drop them below"
-                className="w-4 h-4 rounded-full border border-gray-600 flex items-center justify-center text-[10px] hover:border-gray-400 hover:text-white transition-colors"
+                onClick={() => setSidebarTab('assets')} 
+                className={cn("flex-1 py-2 px-1 rounded flex flex-col items-center gap-1 transition-all", sidebarTab === 'assets' ? "bg-blue-600 text-white shadow-lg shadow-blue-600/20" : "text-gray-500 hover:bg-white/5")}
               >
-                +
+                <Layers size={14} />
+                <span className="text-[7px] font-bold uppercase tracking-tighter">Library</span>
               </button>
-              <input 
-                type="file" 
-                ref={fileInputRef} 
-                onChange={handleFileUpload} 
-                multiple 
-                accept="video/*,audio/*,image/*" 
-                className="hidden" 
-              />
+              <button 
+                onClick={() => setSidebarTab('templates')} 
+                className={cn("flex-1 py-2 px-1 rounded flex flex-col items-center gap-1 transition-all", sidebarTab === 'templates' ? "bg-blue-600 text-white shadow-lg shadow-blue-600/20" : "text-gray-500 hover:bg-white/5")}
+              >
+                <LayoutTemplate size={14} />
+                <span className="text-[7px] font-bold uppercase tracking-tighter">Styles</span>
+              </button>
+              <button 
+                onClick={() => setSidebarTab('background')} 
+                className={cn("flex-1 py-2 px-1 rounded flex flex-col items-center gap-1 transition-all", sidebarTab === 'background' ? "bg-blue-600 text-white shadow-lg shadow-blue-600/20" : "text-gray-500 hover:bg-white/5")}
+              >
+                <Palette size={14} />
+                <span className="text-[7px] font-bold uppercase tracking-tighter">Design</span>
+              </button>
+              <button 
+                onClick={() => setSidebarTab('transitions')} 
+                className={cn("flex-1 py-2 px-1 rounded flex flex-col items-center gap-1 transition-all", sidebarTab === 'transitions' ? "bg-blue-600 text-white shadow-lg shadow-blue-600/20" : "text-gray-500 hover:bg-white/5")}
+              >
+                <ArrowRightLeft size={14} />
+                <span className="text-[7px] font-bold uppercase tracking-tighter">FX</span>
+              </button>
             </div>
-            <div className="grid grid-cols-2 gap-x-2 gap-y-3 overflow-y-auto pr-1 custom-scrollbar z-10 pb-4">
-              {state.assets.map((asset) => (
-                <div key={asset.id} className="flex flex-col gap-1.5" title={`Drag ${asset.name} into the timeline to use`}>
-                  <div 
-                    draggable
-                    onDragStart={(e) => handleAssetDragStart(e, asset)}
-                    className="group aspect-video bg-gray-800 rounded relative overflow-hidden border border-white/5 cursor-grab hover:border-blue-500/30 transition-all active:cursor-grabbing"
+
+            <div className="flex-1 overflow-y-auto custom-scrollbar">
+              <AnimatePresence mode="wait">
+                {sidebarTab === 'assets' && (
+                  <motion.div
+                    key="assets"
+                    initial={{ opacity: 0, x: -10 }}
+                    animate={{ opacity: 1, x: 0 }}
+                    exit={{ opacity: 0, x: -10 }}
+                    className="flex flex-col h-full"
                   >
-                    <div className="flex h-full w-full items-center justify-center bg-blue-500/5">
-                      {asset.type === 'video' ? <Video className="h-4 w-4 text-blue-500/40" /> : 
-                       asset.type === 'audio' ? <Music className="h-4 w-4 text-emerald-500/40" /> : 
-                       <ImageIcon className="h-4 w-4 text-orange-500/40" />}
+                    <div className="flex items-center justify-between mb-3 z-10">
+                      <h3 className="text-[10px] font-bold text-gray-400 uppercase tracking-widest">Media Assets</h3>
+                      <button 
+                        onClick={() => fileInputRef.current?.click()}
+                        className="w-4 h-4 rounded-full border border-gray-600 flex items-center justify-center text-[10px] hover:border-gray-400 hover:text-white transition-colors"
+                      >
+                        +
+                      </button>
                     </div>
-                    <div className="absolute top-1 left-1 text-[7px] bg-black/60 px-1 rounded font-bold uppercase">{asset.type}</div>
-                    <button 
-                      onClick={(e) => { e.stopPropagation(); removeAsset(asset.id); }}
-                      title="Delete permanently"
-                      className="absolute top-1 right-1 p-1 bg-black/60 rounded opacity-0 group-hover:opacity-100 transition-opacity hover:bg-red-500/40"
-                    >
-                      <Trash2 className="h-3 w-3 text-white" />
-                    </button>
-                  </div>
-                  <span className="text-[9px] text-gray-400 truncate leading-tight hover:text-white transition-colors cursor-default" title={asset.name}>{asset.name}</span>
-                </div>
-              ))}
-              {state.assets.length === 0 && (
-                <div className="col-span-2 flex flex-col items-center justify-center h-full opacity-20 py-8">
-                  <Plus className="h-8 w-8 mb-2" />
-                  <span className="text-[10px] uppercase font-bold tracking-widest text-center px-4">Drag & Drop Media Here<br/><span className="text-[8px] font-normal tracking-normal normal-case opacity-70">or click the + button to browse</span></span>
-                </div>
-              )}
+                    <div className="grid grid-cols-2 gap-x-2 gap-y-3 pb-4">
+                      {state.assets.map((asset) => (
+                        <div key={asset.id} className="flex flex-col gap-1.5" title={`Drag ${asset.name} into the timeline to use`}>
+                          <div 
+                            draggable
+                            onDragStart={(e) => handleAssetDragStart(e, asset)}
+                            className="group aspect-video bg-gray-800 rounded relative overflow-hidden border border-white/5 cursor-grab hover:border-blue-500/30 transition-all active:cursor-grabbing"
+                          >
+                            <div className="flex h-full w-full items-center justify-center bg-blue-500/5">
+                              {asset.type === 'video' ? <Video className="h-4 w-4 text-blue-500/40" /> : 
+                               asset.type === 'audio' ? <Music className="h-4 w-4 text-emerald-500/40" /> : 
+                               <ImageIcon className="h-4 w-4 text-orange-500/40" />}
+                            </div>
+                            <div className="absolute top-1 left-1 text-[7px] bg-black/60 px-1 rounded font-bold uppercase">{asset.type}</div>
+                            <button 
+                              onClick={(e) => { e.stopPropagation(); removeAsset(asset.id); }}
+                              className="absolute top-1 right-1 p-1 bg-black/60 rounded opacity-0 group-hover:opacity-100 transition-opacity hover:bg-red-500/40"
+                            >
+                              <Trash2 className="h-3 w-3 text-white" />
+                            </button>
+                          </div>
+                          <span className="text-[9px] text-gray-400 truncate leading-tight hover:text-white transition-colors cursor-default" title={asset.name}>{asset.name}</span>
+                        </div>
+                      ))}
+                      {state.assets.length === 0 && (
+                        <div className="col-span-2 flex flex-col items-center justify-center h-full opacity-20 py-8">
+                          <Plus className="h-8 w-8 mb-2" />
+                          <span className="text-[10px] uppercase font-bold tracking-widest text-center px-4">Import Media</span>
+                        </div>
+                      )}
+                    </div>
+                  </motion.div>
+                )}
+
+                {sidebarTab === 'templates' && (
+                  <motion.div
+                    key="templates"
+                    initial={{ opacity: 0, x: -10 }}
+                    animate={{ opacity: 1, x: 0 }}
+                    exit={{ opacity: 0, x: -10 }}
+                  >
+                    <TemplatePanel onApply={applyTemplate} />
+                  </motion.div>
+                )}
+
+                {sidebarTab === 'background' && (
+                  <motion.div
+                    key="background"
+                    initial={{ opacity: 0, x: -10 }}
+                    animate={{ opacity: 1, x: 0 }}
+                    exit={{ opacity: 0, x: -10 }}
+                  >
+                    <BackgroundPanel 
+                      config={state.background} 
+                      onChange={(config) => setState(s => ({ ...s, background: config }))} 
+                      assets={state.assets}
+                      onUploadRequest={() => fileInputRef.current?.click()}
+                    />
+                  </motion.div>
+                )}
+
+                {sidebarTab === 'transitions' && (
+                  <motion.div
+                    key="transitions"
+                    initial={{ opacity: 0, x: -10 }}
+                    animate={{ opacity: 1, x: 0 }}
+                    exit={{ opacity: 0, x: -10 }}
+                  >
+                    <TransitionPanel onAutoSync={handleAutoSyncTransitions} />
+                  </motion.div>
+                )}
+              </AnimatePresence>
             </div>
+            
+            <input 
+              type="file" 
+              ref={fileInputRef} 
+              onChange={handleFileUpload} 
+              multiple 
+              accept="video/*,audio/*,image/*" 
+              className="hidden" 
+            />
           </div>
           
           <div className="h-36 rounded-lg border p-3 flex flex-col" style={{ backgroundColor: THEME.card, borderColor: THEME.border }} title="Information overview for the current project.">
@@ -1138,6 +1528,8 @@ export default function App() {
                   width={1920} 
                   height={1080} 
                   isCropping={showCropTool}
+                  background={state.background}
+                  transitions={state.transitions}
                 />
                 
                 {showCropTool && (
@@ -1345,6 +1737,7 @@ export default function App() {
               label="Video 1" 
               icon={<Video />} 
               clips={state.clips.filter(c => c.trackIndex === 0)} 
+              transitions={state.transitions}
               zoom={state.zoomLevel} 
               onSeek={(t: number) => setState(s => ({...s, currentTime: t}))} 
               onSelect={(id: string) => setState(s => ({...s, selectedClipId: id}))}
@@ -1357,6 +1750,7 @@ export default function App() {
               label="Overlay" 
               icon={<Layers />} 
               clips={state.clips.filter(c => c.trackIndex === 1)} 
+              transitions={state.transitions}
               zoom={state.zoomLevel} 
               onSeek={(t: number) => setState(s => ({...s, currentTime: t}))} 
               onSelect={(id: string) => setState(s => ({...s, selectedClipId: id}))}
@@ -1366,9 +1760,21 @@ export default function App() {
               onContextMenu={handleContextMenu}
             />
             <Track 
-              label="Audio" 
+              label="Music" 
               icon={<Music />} 
               clips={state.clips.filter(c => c.trackIndex === 2)} 
+              zoom={state.zoomLevel} 
+              onSeek={(t: number) => setState(s => ({...s, currentTime: t}))} 
+              onSelect={(id: string) => setState(s => ({...s, selectedClipId: id}))}
+              onMove={updateClipPosition}
+              onTrim={updateClipDuration}
+              selectedId={state.selectedClipId}
+              onContextMenu={handleContextMenu}
+            />
+            <Track 
+              label="Voice" 
+              icon={<Zap />} 
+              clips={state.clips.filter(c => c.trackIndex === 3)} 
               zoom={state.zoomLevel} 
               onSeek={(t: number) => setState(s => ({...s, currentTime: t}))} 
               onSelect={(id: string) => setState(s => ({...s, selectedClipId: id}))}
@@ -1380,6 +1786,53 @@ export default function App() {
           </div>
         </div>
       </footer>
+
+      <AnimatePresence>
+        {isProcessing && (
+          <motion.div 
+            initial={{ opacity: 0 }} 
+            animate={{ opacity: 1 }} 
+            exit={{ opacity: 0 }}
+            className="fixed inset-0 z-[200] bg-black/90 backdrop-blur-xl flex flex-col items-center justify-center p-8"
+          >
+            <div className="w-full max-w-md space-y-8 text-center">
+              <div className="relative inline-block">
+                <Loader2 className="w-16 h-16 text-blue-500 animate-spin opacity-20" />
+                <div className="absolute inset-0 flex items-center justify-center">
+                  <div className="w-8 h-8 bg-blue-600 rounded-lg flex items-center justify-center rotate-45 shadow-[0_0_30px_rgba(37,99,235,0.6)]">
+                    <div className="w-2 h-2 bg-white rounded-full"></div>
+                  </div>
+                </div>
+              </div>
+              
+              <div className="space-y-2">
+                <h2 className="text-xl font-bold text-white uppercase tracking-[0.3em]">Processing Render</h2>
+                <p className="text-gray-400 text-xs font-medium uppercase tracking-widest opacity-50">Stitching frames • Encoding {videoExportConfig.quality} resolution</p>
+              </div>
+
+              <div className="space-y-4">
+                <div className="flex justify-between text-[10px] font-bold text-gray-400 uppercase tracking-[0.2em] mb-2 px-1">
+                  <span>Rendering Pipeline</span>
+                  <span className="tabular-nums text-blue-400">{Math.round(progress * 100)}%</span>
+                </div>
+                <div className="h-2 w-full bg-white/5 rounded-full overflow-hidden border border-white/5">
+                  <motion.div 
+                    className="h-full bg-blue-600 shadow-[0_0_20px_rgba(37,99,235,0.4)]"
+                    initial={{ width: 0 }}
+                    animate={{ width: `${progress * 100}%` }}
+                    transition={{ type: "spring", bounce: 0, duration: 0.2 }}
+                  />
+                </div>
+                <div className="flex justify-center pt-2">
+                   <div className="px-3 py-1 bg-white/5 rounded-full border border-white/10">
+                      <span className="text-[9px] font-mono text-gray-500 uppercase tracking-tighter">Do not close this tab until download begins</span>
+                   </div>
+                </div>
+              </div>
+            </div>
+          </motion.div>
+        )}
+      </AnimatePresence>
 
       {/* Video Export Modal */}
       <AnimatePresence>
@@ -1433,9 +1886,13 @@ export default function App() {
                     onChange={(e) => setVideoExportConfig(prev => ({ ...prev, fps: Number(e.target.value) }))}
                     className="w-full bg-[#0A0A0A] border border-white/5 rounded-lg px-3 py-2.5 text-xs text-white focus:outline-none focus:border-blue-500/50 appearance-none cursor-pointer"
                   >
-                    <option value={60}>60 FPS (Smooth)</option>
-                    <option value={30}>30 FPS (Standard)</option>
-                    <option value={24}>24 FPS (Cinematic)</option>
+                    <option value={0}>Auto (Match Original / 60 FPS)</option>
+                    <option value={120}>120 FPS (Ultra Smooth / Pro)</option>
+                    <option value={90}>90 FPS (High Performance)</option>
+                    <option value={60}>60 FPS (Standard)</option>
+                    <option value={30}>30 FPS (Classic TV)</option>
+                    <option value={24}>24 FPS (Cinematic / Film)</option>
+                    <option value={15}>15 FPS (Lo-fi / Animated GIF style)</option>
                   </select>
                 </div>
               </div>
@@ -1472,7 +1929,7 @@ export default function App() {
   );
 }
 
-function Track({ label, icon, clips, zoom, onSeek, onSelect, onMove, onTrim, selectedId, onContextMenu }: any) {
+function Track({ label, icon, clips, zoom, transitions = [], onSeek, onSelect, onMove, onTrim, selectedId, onContextMenu }: any) {
   return (
     <div className="relative h-14 flex bg-white/[0.02] border-b border-white/[0.05] min-w-max group overflow-hidden">
       <div 
@@ -1485,6 +1942,7 @@ function Track({ label, icon, clips, zoom, onSeek, onSelect, onMove, onTrim, sel
         </div>
       </div>
       <div className="relative flex-1 min-w-[5000px] h-full p-1.5">
+        {/* Clips Rendering */}
         {clips?.map((c: any) => (
           <motion.div 
             key={`${c.id}-${c.startTime}`}
@@ -1499,8 +1957,8 @@ function Track({ label, icon, clips, zoom, onSeek, onSelect, onMove, onTrim, sel
             }}
             onContextMenu={(e) => onContextMenu(e, c.id)}
             className={cn(
-              "absolute h-10 top-2 rounded-md border flex items-start pt-1 px-1 cursor-grab overflow-hidden active:cursor-grabbing shadow-lg group/clip text-white transition-all",
-              selectedId === c.id ? "ring-2 ring-white/50 z-20 scale-[1.02] shadow-2xl" : "z-10",
+              "absolute h-10 top-2 rounded-md border flex items-start pt-1 px-1 cursor-grab overflow-hidden active:cursor-grabbing shadow-lg group/clip text-white",
+              selectedId === c.id ? "ring-2 ring-white/50 z-20 shadow-2xl" : "z-10",
               label === "Video 1" ? (selectedId === c.id ? "bg-blue-500/40 border-blue-300 shadow-[0_0_20px_rgba(59,130,246,0.3)]" : "bg-blue-500/10 border-blue-500/30 hover:bg-blue-500/20") :
               label === "Overlay" ? (selectedId === c.id ? "bg-purple-500/40 border-purple-300 shadow-[0_0_20px_rgba(168,85,247,0.3)]" : "bg-purple-500/10 border-purple-500/30 hover:bg-purple-500/20") :
               (selectedId === c.id ? "bg-emerald-500/40 border-emerald-300 shadow-[0_0_20px_rgba(16,185,129,0.3)]" : "bg-emerald-600/10 border-emerald-500/30 hover:bg-emerald-600/20")
@@ -1522,18 +1980,24 @@ function Track({ label, icon, clips, zoom, onSeek, onSelect, onMove, onTrim, sel
                 sourceEnd={c.sourceEnd} 
               />
             )}
-            
-            {/* Label Overlay */}
-            <div className="absolute inset-x-0 bottom-0 top-auto flex items-center p-1 bg-black/40 pointer-events-none z-10">
-              <span className="text-[8px] font-bold truncate opacity-80 uppercase tracking-tighter">{c.name}</span>
-            </div>
 
+            {/* Audio Waveform */}
+            {(c.type === 'audio' || c.type === 'video') && c.audio?.waveform && (
+              <div className="absolute inset-0 z-0 pointer-events-none opacity-40">
+                <AudioWaveform data={c.audio.waveform} color={c.type === 'audio' ? "#10B981" : "#3B82F6"} />
+              </div>
+            )}
+
+            {/* Content info */}
+            <div className="z-10 flex items-center gap-1.5 truncate pointer-events-none">
+               <span className="text-[8px] font-bold opacity-70 uppercase tracking-tighter truncate">{c.name}</span>
+            </div>
+            
             {/* Trim Handles */}
             {selectedId === c.id && (
               <>
                 <div 
                   className="absolute left-0 top-0 bottom-0 w-2 hover:bg-white/20 cursor-ew-resize z-30"
-                  title="Trim Clip Start"
                   onMouseDown={(e) => {
                     e.stopPropagation();
                     const startX = e.clientX;
@@ -1551,7 +2015,6 @@ function Track({ label, icon, clips, zoom, onSeek, onSelect, onMove, onTrim, sel
                 />
                 <div 
                   className="absolute right-0 top-0 bottom-0 w-2 hover:bg-white/20 cursor-ew-resize z-30"
-                  title="Trim Clip End"
                   onMouseDown={(e) => {
                     e.stopPropagation();
                     const startX = e.clientX;
@@ -1569,22 +2032,36 @@ function Track({ label, icon, clips, zoom, onSeek, onSelect, onMove, onTrim, sel
                 />
               </>
             )}
-            
-            {c.type === 'video' && (
-              <Filmstrip 
-                url={c.url} 
-                duration={c.duration} 
-                zoom={zoom} 
-                sourceStart={c.sourceStart} 
-                sourceEnd={c.sourceEnd} 
-              />
-            )}
-            
-            <div className="absolute top-1 left-1 w-1.5 h-1.5 rounded-full z-20 shadow-sm" style={{ 
-              backgroundColor: label === "Video 1" ? "#3B82F6" : label === "Overlay" ? "#A855F7" : "#10B981" 
-            }} />
           </motion.div>
         ))}
+
+        {/* Transitions Rendering */}
+        {transitions?.map((t: any) => {
+          const fromClip = clips.find((c: any) => c.id === t.fromClipId);
+          const toClip = clips.find((c: any) => c.id === t.toClipId);
+          if (!fromClip || !toClip) return null;
+          
+          const junction = fromClip.startTime + fromClip.duration;
+          const start = junction - t.duration / 2;
+          
+          return (
+            <div 
+              key={t.id}
+              className="absolute h-full top-0 bg-blue-500/30 border-x border-blue-400 group/transition cursor-pointer hover:bg-blue-500/50 transition-all z-[25] flex items-center justify-center backdrop-blur-[2px]"
+              style={{ left: start * zoom, width: t.duration * zoom }}
+              title={`Transition: ${t.type}\nDouble click to remove`}
+              onDoubleClick={(e) => {
+                e.stopPropagation();
+                onContextMenu(e, t.id, 'transition');
+              }}
+            >
+               <div className="w-[1.5px] h-3 bg-white/60 rounded-full" />
+               <div className="absolute inset-x-0 bottom-0 py-0.5 bg-blue-600/60 opacity-0 group-hover/transition:opacity-100 transition-opacity">
+                 <p className="text-[6px] font-bold text-center text-white scale-75 uppercase truncate">{t.type}</p>
+               </div>
+            </div>
+          );
+        })}
       </div>
     </div>
   );

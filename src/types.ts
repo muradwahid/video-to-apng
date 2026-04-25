@@ -13,6 +13,9 @@ export interface VideoClip {
   transform: {
     scale: number;
     rotation: number;
+    x?: number;
+    y?: number;
+    opacity?: number;
     crop?: {
       x: number;
       y: number;
@@ -35,6 +38,28 @@ export interface VideoClip {
     volume: number;
     fadeIn: number;
     fadeOut: number;
+    muted: boolean;
+    pan?: number; // -1 (left) to 1 (right)
+    eq?: {
+      low: number;
+      mid: number;
+      high: number;
+    };
+    effects?: {
+      reverb: number;
+      delay: number;
+      pitch: number;
+    };
+    noiseReduction?: boolean;
+    voiceClarity?: boolean;
+    waveform?: number[];
+  };
+  cutout?: {
+    enabled: boolean;
+    type: 'chroma' | 'ai';
+    keyColor?: string;
+    similarity?: number;
+    smoothness?: number;
   };
 }
 
@@ -46,6 +71,41 @@ export interface MediaAsset {
   duration?: number;
   thumbnail?: string;
   size: number;
+  audioWaveform?: number[];
+}
+
+export interface BackgroundConfig {
+  type: 'solid' | 'gradient' | 'image' | 'video' | 'blur';
+  color?: string;
+  gradient?: {
+    from: string;
+    to: string;
+    angle: number;
+  };
+  mediaUrl?: string;
+  opacity: number;
+  blurIntensity: number;
+  fit: 'cover' | 'contain' | 'stretch';
+  overlayColor?: string;
+  overlayOpacity?: number;
+}
+
+export interface Transition {
+  id: string;
+  type: 'fade' | 'cross-dissolve' | 'slide-left' | 'slide-right' | 'slide-up' | 'slide-down' | 'zoom-in' | 'zoom-out' | 'blur' | 'glitch';
+  duration: number; // seconds
+  fromClipId: string;
+  toClipId: string;
+  easing: 'ease-in' | 'ease-out' | 'linear';
+}
+
+export interface Template {
+  id: string;
+  name: string;
+  description: string;
+  thumbnail: string;
+  state: Partial<TimelineState>;
+  category: 'social' | 'marketing' | 'slideshow' | 'intro' | 'podcast';
 }
 
 export interface TimelineState {
@@ -56,6 +116,8 @@ export interface TimelineState {
   isPlaying: boolean;
   selectedClipId: string | null;
   zoomLevel: number;
+  background: BackgroundConfig;
+  transitions: Transition[];
 }
 
 export interface APNGOptions {

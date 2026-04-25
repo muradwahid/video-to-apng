@@ -1,6 +1,11 @@
 import React from 'react';
 import { TimelineState, VideoClip } from '../types';
-import { Sun, Contrast, Droplets, Sparkles, Wind, Volume2, MoveHorizontal, Maximize2, RotateCw, FastForward, Scissors as Scissor } from 'lucide-react';
+import { audioEngine } from '../services/audioEngine';
+import { 
+  Sun, Contrast, Droplets, Sparkles, Wind, Volume2, 
+  MoveHorizontal, Maximize2, RotateCw, FastForward, 
+  Scissors as Scissor, Sliders, Zap, Monitor, Info 
+} from 'lucide-react';
 import { cn } from '../lib/utils';
 
 interface PropertyInspectorProps {
@@ -60,6 +65,7 @@ export function PropertyInspector({ state, setState, activeTab }: PropertyInspec
         ...c,
         filters: {
           brightness: 1, contrast: 1, saturation: 1, blur: 0, grayscale: 0, sepia: 0, invert: 0,
+          vignette: 0, grain: 0,
           ...(c.filters || {}),
           [filter]: value
         }
@@ -67,19 +73,56 @@ export function PropertyInspector({ state, setState, activeTab }: PropertyInspec
     }));
   };
 
-  const updateAudio = (key: string, value: number) => {
+  const updateCutout = (key: string, value: any) => {
     if (!state.selectedClipId) return;
     setState(prev => ({
       ...prev,
       clips: prev.clips.map(c => c.id === prev.selectedClipId ? {
         ...c,
-        audio: {
-          volume: 1, fadeIn: 0, fadeOut: 0,
-          ...(c.audio || {}),
+        cutout: {
+          enabled: false,
+          type: 'chroma',
+          keyColor: '#00ff00',
+          similarity: 0.1,
+          smoothness: 0.1,
+          ...(c.cutout || {}),
           [key]: value
         }
       } : c)
     }));
+  };
+
+  const updateAudio = (key: string, value: any, nestedKey?: string) => {
+    if (!state.selectedClipId) return;
+    setState(prev => {
+      const newClips = prev.clips.map(c => {
+        if (c.id !== prev.selectedClipId) return c;
+        const audio = {
+          volume: 1, fadeIn: 0, fadeOut: 0, muted: false, pan: 0,
+          eq: { low: 0, mid: 0, high: 0 },
+          effects: { reverb: 0, delay: 0, pitch: 0 },
+          ...(c.audio || {})
+        };
+        
+        if (nestedKey) {
+          (audio as any)[key] = { ...(audio as any)[key], [nestedKey]: value };
+        } else {
+          (audio as any)[key] = value;
+        }
+
+        const newClip = { ...c, audio };
+        // Real-time audio update
+        audioEngine.updateClipAudio(newClip);
+        return newClip;
+      });
+      return { ...prev, clips: newClips };
+    });
+  };
+
+  const handleAIAction = async (action: string) => {
+    if (!state.selectedClipId) return;
+    alert(`Triggering AI ${action} for selected clip. This would use Gemini API for processing.`);
+    // Implementation would go here calling Gemini API with audio data
   };
 
   if (!selectedClip && activeTab !== "export") {
@@ -226,6 +269,70 @@ export function PropertyInspector({ state, setState, activeTab }: PropertyInspec
               title="Add simulated noisy film grain texture"
             />
           </InspectorSection>
+
+          <InspectorSection title="Cutout & Chroma" icon={<Scissor size={12} />}>
+            <div className="flex items-center justify-between p-2 rounded bg-white/5 border border-white/5 mb-4">
+              <label className="text-[10px] font-medium text-gray-400 uppercase tracking-widest">Enable Cutout</label>
+              <button 
+                onClick={() => updateCutout('enabled', !(selectedClip?.cutout?.enabled ?? false))}
+                className={cn(
+                  "w-8 h-4 rounded-full transition-all relative",
+                  selectedClip?.cutout?.enabled ? "bg-blue-500" : "bg-white/10"
+                )}
+              >
+                <div className={cn(
+                  "absolute top-0.5 w-3 h-3 rounded-full bg-white transition-all",
+                  selectedClip?.cutout?.enabled ? "left-4.5" : "left-0.5"
+                )} />
+              </button>
+            </div>
+
+            {selectedClip?.cutout?.enabled && (
+              <div className="space-y-4 pt-2 border-t border-white/5">
+                <div className="flex gap-2">
+                  <button 
+                    onClick={() => updateCutout('type', 'chroma')}
+                    className={cn("flex-1 py-1 px-2 text-[8px] font-bold uppercase rounded border transition-all", selectedClip.cutout.type === 'chroma' ? "bg-blue-600 border-blue-400" : "bg-white/5 border-white/5 text-gray-500")}
+                  >
+                    Chroma Key
+                  </button>
+                  <button 
+                    onClick={() => updateCutout('type', 'ai')}
+                    className={cn("flex-1 py-1 px-2 text-[8px] font-bold uppercase rounded border transition-all", selectedClip.cutout.type === 'ai' ? "bg-blue-600 border-blue-400" : "bg-white/5 border-white/5 text-gray-500")}
+                  >
+                    AI Cutout
+                  </button>
+                </div>
+
+                {selectedClip.cutout.type === 'chroma' && (
+                  <>
+                    <div className="flex items-center justify-between">
+                      <label className="text-[10px] text-gray-400 font-medium">Key Color</label>
+                      <input 
+                        type="color" 
+                        value={selectedClip.cutout.keyColor || '#00ff00'}
+                        onChange={(e) => updateCutout('keyColor', e.target.value)}
+                        className="w-12 h-6 bg-transparent border-none p-0 cursor-pointer"
+                      />
+                    </div>
+                    <SliderProperty 
+                      label="Similarity" 
+                      value={selectedClip.cutout.similarity ?? 0.1} 
+                      min={0} max={1} step={0.01}
+                      onChange={(v) => updateCutout('similarity', v)} 
+                    />
+                  </>
+                )}
+
+                {selectedClip.cutout.type === 'ai' && (
+                  <div className="p-2 rounded bg-blue-500/10 border border-blue-500/20">
+                     <p className="text-[9px] text-blue-400 font-bold uppercase mb-1">AI Semantic Segmentation</p>
+                     <p className="text-[8px] text-blue-300 leading-tight">Advanced subject isolation using neural networks. Optimized for portrait and center-stage subjects.</p>
+                  </div>
+                )}
+              </div>
+            )}
+          </InspectorSection>
           
           <div className="p-4 rounded-lg bg-blue-500/5 border border-blue-500/10">
             <h4 className="text-[9px] font-bold uppercase tracking-widest text-blue-400 mb-2">Pro Tip</h4>
@@ -238,17 +345,60 @@ export function PropertyInspector({ state, setState, activeTab }: PropertyInspec
 
       {activeTab === "audio" && (
         <div className="space-y-6">
-          <InspectorSection title="Audio Levels" icon={<Volume2 size={12} />}>
+          <InspectorSection title="Mixer" icon={<Volume2 size={12} />}>
+            <div className="flex items-center justify-between mb-2 p-2 rounded bg-white/5 border border-white/5">
+              <label className="text-[10px] font-medium text-gray-400">Mute Audio</label>
+              <button 
+                onClick={() => updateAudio('muted', !(selectedClip?.audio?.muted ?? false))}
+                className={cn(
+                  "w-8 h-4 rounded-full transition-all relative",
+                  selectedClip?.audio?.muted ? "bg-red-500" : "bg-white/10"
+                )}
+              >
+                <div className={cn(
+                  "absolute top-0.5 w-3 h-3 rounded-full bg-white transition-all",
+                  selectedClip?.audio?.muted ? "left-4.5" : "left-0.5"
+                )} />
+              </button>
+            </div>
             <SliderProperty 
-              label="Clip Volume" 
+              label="Volume" 
               value={selectedClip?.audio?.volume ?? 1} 
               min={0} max={2} step={0.01}
               onChange={(v) => updateAudio('volume', v)} 
               title="Master volume multiplier for this specific clip"
             />
+            <SliderProperty 
+              label="Panning" 
+              value={selectedClip?.audio?.pan ?? 0} 
+              min={-1} max={1} step={0.01}
+              onChange={(v) => updateAudio('pan', v)} 
+              title="Stereo placement (Left to Right)"
+            />
+          </InspectorSection>
+
+          <InspectorSection title="Equalizer" icon={<Sliders size={12} />}>
+            <SliderProperty 
+              label="Bass" 
+              value={selectedClip?.audio?.eq?.low ?? 0} 
+              min={-20} max={20} step={1}
+              onChange={(v) => updateAudio('eq', v, 'low')} 
+            />
+            <SliderProperty 
+              label="Mid" 
+              value={selectedClip?.audio?.eq?.mid ?? 0} 
+              min={-20} max={20} step={1}
+              onChange={(v) => updateAudio('eq', v, 'mid')} 
+            />
+            <SliderProperty 
+              label="Treble" 
+              value={selectedClip?.audio?.eq?.high ?? 0} 
+              min={-20} max={20} step={1}
+              onChange={(v) => updateAudio('eq', v, 'high')} 
+            />
           </InspectorSection>
           
-          <InspectorSection title="Transitions" icon={<MoveHorizontal size={12} />}>
+          <InspectorSection title="Fade Transitions" icon={<MoveHorizontal size={12} />}>
             <SliderProperty 
               label="Fade In (s)" 
               value={selectedClip?.audio?.fadeIn ?? 0} 
@@ -263,6 +413,46 @@ export function PropertyInspector({ state, setState, activeTab }: PropertyInspec
               onChange={(v) => updateAudio('fadeOut', v)} 
               title="Seconds taken to fade audio out to silence at the end"
             />
+          </InspectorSection>
+
+          <InspectorSection title="AI Intelligence" icon={<Zap size={12} />}>
+            <div className="grid grid-cols-2 gap-2">
+              <button 
+                onClick={() => handleAIAction('Enhance Voice')}
+                className="flex flex-col items-center gap-2 p-2 rounded bg-blue-500/10 border border-blue-500/20 hover:bg-blue-500/20 transition-all text-blue-400"
+              >
+                <Sparkles size={16} />
+                <span className="text-[8px] font-bold uppercase tracking-tighter">Enhance</span>
+              </button>
+              <button 
+                onClick={() => handleAIAction('Noise Removal')}
+                className="flex flex-col items-center gap-2 p-2 rounded bg-purple-500/10 border border-purple-500/20 hover:bg-purple-500/20 transition-all text-purple-400"
+              >
+                <Wind size={16} />
+                <span className="text-[8px] font-bold uppercase tracking-tighter">De-Noise</span>
+              </button>
+              <button 
+                onClick={() => handleAIAction('Generate Captions')}
+                className="flex flex-col items-center gap-2 p-2 rounded bg-emerald-500/10 border border-emerald-500/20 hover:bg-emerald-500/20 transition-all text-emerald-400"
+              >
+                <Monitor size={16} />
+                <span className="text-[8px] font-bold uppercase tracking-tighter">Captions</span>
+              </button>
+              <button 
+                onClick={() => handleAIAction('Voice To Text')}
+                className="flex flex-col items-center gap-2 p-2 rounded bg-orange-500/10 border border-orange-500/20 hover:bg-orange-500/20 transition-all text-orange-400"
+              >
+                <Info size={16} />
+                <span className="text-[8px] font-bold uppercase tracking-tighter">STT</span>
+              </button>
+              <button 
+                onClick={() => handleAIAction('Remove Sound')}
+                className="col-span-2 flex items-center justify-center gap-2 p-2 rounded bg-red-500/10 border border-red-500/20 hover:bg-red-500/20 transition-all text-red-400"
+              >
+                <Volume2 size={14} className="opacity-50" />
+                <span className="text-[8px] font-bold uppercase tracking-tighter">Strip Audio Track</span>
+              </button>
+            </div>
           </InspectorSection>
         </div>
       )}
