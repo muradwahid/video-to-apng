@@ -1,5 +1,5 @@
 import React from 'react';
-import { Ghost, MoveHorizontal, MoveVertical, ZoomIn, ZoomOut, Loader2, Sparkles, Wand2, ArrowRightLeft, Sun, Maximize, Circle, RotateCw, Wind } from 'lucide-react';
+import { Ghost, MoveHorizontal, MoveVertical, ZoomIn, ZoomOut, Loader2, Sparkles, Wand2, ArrowRightLeft, Sun, Maximize, Circle, RotateCw, Wind, Search } from 'lucide-react';
 import { cn } from '../lib/utils';
 
 const TRANSITION_PRESETS = [
@@ -23,8 +23,27 @@ interface TransitionPanelProps {
 }
 
 export const TransitionPanel: React.FC<TransitionPanelProps> = ({ onAutoSync }) => {
+  const [search, setSearch] = React.useState('');
+
+  const filteredTransitions = TRANSITION_PRESETS.filter(t => 
+    !search || t.label.toLowerCase().includes(search.toLowerCase())
+  );
+
   return (
     <div className="flex flex-col gap-4 p-1">
+      <div className="relative group mb-1">
+        <div className="absolute left-2 top-1/2 -translate-y-1/2 text-gray-500 group-focus-within:text-blue-500">
+           <Search size={10} />
+        </div>
+        <input 
+          type="text"
+          placeholder="FIND Transitions..."
+          value={search}
+          onChange={(e) => setSearch(e.target.value)}
+          className="w-full bg-black/40 border border-white/5 rounded-md py-1.5 pl-7 pr-2 text-[8px] font-bold uppercase tracking-wider focus:border-blue-500/50 focus:outline-none transition-all placeholder:text-gray-700"
+        />
+      </div>
+
       <div className="flex items-center justify-between px-1">
         <h4 className="text-[9px] font-bold text-gray-500 uppercase tracking-widest">Library</h4>
         <div className="flex gap-1">
@@ -34,7 +53,7 @@ export const TransitionPanel: React.FC<TransitionPanelProps> = ({ onAutoSync }) 
       </div>
       
       <div className="grid grid-cols-2 gap-2">
-        {TRANSITION_PRESETS.map((t) => (
+        {filteredTransitions.map((t) => (
           <div
             key={t.id}
             draggable

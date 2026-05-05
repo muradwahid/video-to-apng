@@ -20,7 +20,7 @@ export const VideoCanvas: React.FC<Props> = ({ clips, currentTime, width, height
 
   useEffect(() => {
     // Preload media for active clips and background
-    const activeClips = clips.filter(c => currentTime >= c.startTime && currentTime <= c.startTime + c.duration);
+    const activeClips = (clips || []).filter(c => currentTime >= c.startTime && currentTime <= c.startTime + c.duration);
     const mediaToLoad = [...activeClips.map(c => ({ url: c.url, type: c.type }))];
     
     if (background.mediaUrl) {
@@ -47,7 +47,7 @@ export const VideoCanvas: React.FC<Props> = ({ clips, currentTime, width, height
       
       const media = mediaCache.current[item.url];
       if (media instanceof HTMLVideoElement && item.type === 'video') {
-        const clip = clips.find(c => c.url === item.url);
+        const clip = (clips || []).find(c => c.url === item.url);
         if (clip) {
           const relativeTime = (currentTime - clip.startTime) * clip.speed + clip.sourceStart;
           media.currentTime = relativeTime;
@@ -69,26 +69,26 @@ export const VideoCanvas: React.FC<Props> = ({ clips, currentTime, width, height
       renderBackground(ctx, width, height, background, mediaCache.current, currentTime);
 
       const activeTransition = transitions.find(t => {
-        const fromClip = clips.find(c => c.id === t.fromClipId);
+        const fromClip = (clips || []).find(c => c.id === t.fromClipId);
         if (!fromClip) return false;
         const junction = fromClip.startTime + fromClip.duration;
         return currentTime >= junction - t.duration / 2 && currentTime <= junction + t.duration / 2;
       });
 
       if (activeTransition) {
-        const fromClip = clips.find(c => c.id === activeTransition.fromClipId)!;
-        const toClip = clips.find(c => c.id === activeTransition.toClipId)!;
+        const fromClip = (clips || []).find(c => c.id === activeTransition.fromClipId)!;
+        const toClip = (clips || []).find(c => c.id === activeTransition.toClipId)!;
         const junction = fromClip.startTime + fromClip.duration;
         const progress = (currentTime - (junction - activeTransition.duration / 2)) / activeTransition.duration;
 
-        renderClipWithTransition(ctx, width, height, fromClip, toClip, activeTransition.type, progress, mediaCache.current);
+        renderClipWithTransition(ctx, width, height, fromClip, toClip, activeTransition.type, progress, mediaCache.current, currentTime);
       } else {
-        const activeClips = clips
+        const activeClips = (clips || [])
           .filter(c => c.type !== 'audio' && currentTime >= c.startTime && currentTime < c.startTime + c.duration)
           .sort((a, b) => a.trackIndex - b.trackIndex);
 
         activeClips.forEach(clip => {
-          renderClip(ctx, width, height, clip, mediaCache.current);
+          renderClip(ctx, width, height, clip, mediaCache.current, currentTime);
         });
       }
 
@@ -106,6 +106,7 @@ export const VideoCanvas: React.FC<Props> = ({ clips, currentTime, width, height
 
   return (
     <canvas 
+      id="video-canvas"
       ref={canvasRef} 
       width={width} 
       height={height} 

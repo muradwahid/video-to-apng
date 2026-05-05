@@ -1,5 +1,5 @@
 import React from 'react';
-import { LayoutTemplate, Play, Share2, Download, Instagram, Youtube, Video, Zap } from 'lucide-react';
+import { LayoutTemplate, Play, Share2, Download, Instagram, Youtube, Video, Zap, Search } from 'lucide-react';
 import { cn } from '../lib/utils';
 import { Template } from '../types';
 
@@ -12,21 +12,21 @@ const TEMPLATE_CATEGORIES = [
 
 const PRESET_TEMPLATES: any[] = [
   {
-    id: 't1',
-    name: 'Instagram Reel',
-    description: 'Perfect 9:16 layout with fast cuts and bold typography',
+    id: 'youtube-outro',
+    name: 'YouTube Outro',
+    description: 'Perfect for end-screens with social links',
     thumbnail: 'https://images.unsplash.com/photo-1611162617213-7d7a39e9b1d7?w=200&h=300&fit=crop',
     category: 'social'
   },
   {
-    id: 't2',
-    name: 'Product Promo',
+    id: 'cinematic-story',
+    name: 'Cinematic Story',
     description: 'Clean marketing template for SaaS or physical goods',
     thumbnail: 'https://images.unsplash.com/photo-1460925895917-afdab827c52f?w=200&h=300&fit=crop',
     category: 'marketing'
   },
   {
-    id: 't3',
+    id: 'cinematic-vlog',
     name: 'Cinematic Vlog',
     description: 'Widescreen 2.35:1 aspect ratio with color grading filters',
     thumbnail: 'https://images.unsplash.com/photo-1492691527719-9d1e07e534b4?w=200&h=300&fit=crop',
@@ -40,33 +40,29 @@ interface TemplatePanelProps {
 
 export const TemplatePanel: React.FC<TemplatePanelProps> = ({ onApply }) => {
   const [activeCat, setActiveCat] = React.useState('all');
+  const [search, setSearch] = React.useState('');
 
-  const PRESET_TEMPLATES: any[] = [
-    {
-      id: 'youtube-outro',
-      name: 'YouTube Outro',
-      description: 'Perfect for end-screens with social links',
-      thumbnail: 'https://images.unsplash.com/photo-1611162617213-7d7a39e9b1d7?w=200&h=300&fit=crop',
-      category: 'social'
-    },
-    {
-      id: 'cinematic-story',
-      name: 'Cinematic Story',
-      description: 'Clean marketing template for SaaS or physical goods',
-      thumbnail: 'https://images.unsplash.com/photo-1460925895917-afdab827c52f?w=200&h=300&fit=crop',
-      category: 'marketing'
-    },
-    {
-      id: 't3',
-      name: 'Cinematic Vlog',
-      description: 'Widescreen 2.35:1 aspect ratio with color grading filters',
-      thumbnail: 'https://images.unsplash.com/photo-1492691527719-9d1e07e534b4?w=200&h=300&fit=crop',
-      category: 'youtube'
-    }
-  ];
+  const filteredTemplates = PRESET_TEMPLATES.filter(t => {
+    const matchesCat = activeCat === 'all' || t.category === activeCat;
+    const matchesSearch = !search || t.name.toLowerCase().includes(search.toLowerCase()) || t.description.toLowerCase().includes(search.toLowerCase());
+    return matchesCat && matchesSearch;
+  });
 
   return (
     <div className="flex flex-col gap-4 p-1">
+      <div className="relative group">
+        <div className="absolute left-2 top-1/2 -translate-y-1/2 text-gray-500 group-focus-within:text-blue-500">
+           <Search size={10} />
+        </div>
+        <input 
+          type="text"
+          placeholder="FIND STYLES..."
+          value={search}
+          onChange={(e) => setSearch(e.target.value)}
+          className="w-full bg-black/40 border border-white/5 rounded-md py-1.5 pl-7 pr-2 text-[8px] font-bold uppercase tracking-wider focus:border-blue-500/50 focus:outline-none transition-all placeholder:text-gray-700"
+        />
+      </div>
+
       <div className="flex gap-1 overflow-x-auto pb-1 no-scrollbar">
         {TEMPLATE_CATEGORIES.map(cat => (
           <button
@@ -83,7 +79,7 @@ export const TemplatePanel: React.FC<TemplatePanelProps> = ({ onApply }) => {
       </div>
 
       <div className="space-y-3">
-        {PRESET_TEMPLATES.filter(t => activeCat === 'all' || t.category === activeCat).map(template => (
+        {filteredTemplates.map(template => (
           <div 
             key={template.id} 
             onClick={() => onApply?.(template.id)}

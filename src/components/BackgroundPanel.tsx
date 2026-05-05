@@ -1,6 +1,6 @@
 import React from 'react';
 import { BackgroundConfig, MediaAsset } from '../types';
-import { Palette, Image as ImageIcon, Video, Focus, Plus, Trash2, ChevronRight } from 'lucide-react';
+import { Palette, Image as ImageIcon, Video, Focus, Plus, Trash2, ChevronRight, Search } from 'lucide-react';
 import { cn } from '../lib/utils';
 import { motion, AnimatePresence } from 'motion/react';
 
@@ -17,7 +17,7 @@ export const BackgroundPanel: React.FC<Props> = ({ config, onChange, assets, onU
     { id: 'gradient', label: 'Gradient', icon: <Palette size={18} /> },
     { id: 'image', label: 'Image', icon: <ImageIcon size={18} /> },
     { id: 'video', label: 'Video', icon: <Video size={18} /> },
-    { id: 'blur', label: 'Abstract', icon: <Focus size={18} /> },
+    { id: 'blur', label: 'Dynamic', icon: <Focus size={18} /> },
   ];
 
   const gradientPresets = [
@@ -33,7 +33,20 @@ export const BackgroundPanel: React.FC<Props> = ({ config, onChange, assets, onU
     { from: '#0f172a', to: '#334155', label: 'Steel' },
   ];
 
-  const relevantAssets = assets.filter(a => {
+  const abstractPresets = [
+    { color: '#1e1b4b', label: 'Deep Blue' },
+    { color: '#450a0a', label: 'Crimson' },
+    { color: '#064e3b', label: 'Forest' },
+    { color: '#312e81', label: 'Nebula' },
+    { color: '#161616', label: 'Glass' },
+    { color: '#4338ca', label: 'Royal' },
+  ];
+
+  const [search, setSearch] = React.useState('');
+
+  const relevantAssets = (assets || []).filter(a => {
+    const matchesSearch = !search || a.name.toLowerCase().includes(search.toLowerCase());
+    if (!matchesSearch) return false;
     if (config.type === 'video' || config.type === 'blur') return a.type === 'video' || a.type === 'image';
     if (config.type === 'image') return a.type === 'image';
     return false;
@@ -67,7 +80,7 @@ export const BackgroundPanel: React.FC<Props> = ({ config, onChange, assets, onU
             )}>
               {t.icon}
             </div>
-            <span className="text-[7px] font-black uppercase tracking-tighter leading-none text-center h-4 flex items-center px-0.5">{t.label}</span>
+            <span className="text-[7.5px] font-black uppercase tracking-tight leading-none text-center h-3 flex items-center px-0.5">{t.label}</span>
             {config.type === t.id && (
               <motion.div 
                 layoutId="bg-glow"
@@ -233,6 +246,34 @@ export const BackgroundPanel: React.FC<Props> = ({ config, onChange, assets, onU
         {/* Media (Image, Video, Blurred Background) */}
         {(config.type === 'image' || config.type === 'video' || config.type === 'blur') && (
           <div className="space-y-6 animate-in fade-in slide-in-from-bottom-3 duration-500 ease-out">
+            
+            {config.type === 'blur' && !config.mediaUrl && (
+              <div className="space-y-4 px-1">
+                <div className="flex justify-between items-end">
+                  <div className="space-y-1">
+                    <label className="text-[10px] font-black text-white/50 uppercase tracking-[0.25em]">Abstract Presets</label>
+                    <p className="text-[9px] text-white/20 font-medium">Select a starting theme</p>
+                  </div>
+                </div>
+                <div className="grid grid-cols-3 gap-2">
+                  {abstractPresets.map((p, idx) => (
+                    <button
+                      key={idx}
+                      onClick={() => onChange({ ...config, color: p.color })}
+                      className={cn(
+                        "p-2 rounded-xl border transition-all text-left flex items-center gap-2 relative overflow-hidden",
+                        config.color === p.color ? "bg-white/10 border-white/20" : "bg-black/30 border-white/5 hover:border-white/10"
+                      )}
+                    >
+                      <div className="w-4 h-4 rounded-full" style={{ backgroundColor: p.color }} />
+                      <span className="text-[8px] font-bold text-white/60 truncate uppercase tracking-tighter">{p.label}</span>
+                    </button>
+                  ))}
+                </div>
+                <div className="h-px bg-white/5 mx-2" />
+              </div>
+            )}
+
             <div className="space-y-4">
               <div className="flex justify-between items-end px-1">
                 <div className="space-y-1">
@@ -246,6 +287,19 @@ export const BackgroundPanel: React.FC<Props> = ({ config, onChange, assets, onU
                   <Plus size={10} />
                   Import
                 </button>
+              </div>
+
+              <div className="relative group px-1">
+                <div className="absolute left-3 top-1/2 -translate-y-1/2 text-gray-500 group-focus-within:text-blue-500">
+                  <Search size={10} />
+                </div>
+                <input 
+                  type="text"
+                  placeholder="FIND MEDIA..."
+                  value={search}
+                  onChange={(e) => setSearch(e.target.value)}
+                  className="w-full bg-black/40 border border-white/5 rounded-md py-1.5 pl-7 pr-2 text-[8px] font-bold uppercase tracking-wider focus:border-blue-500/50 focus:outline-none transition-all placeholder:text-gray-700"
+                />
               </div>
               
               <div className="min-h-[100px]">
@@ -325,7 +379,7 @@ export const BackgroundPanel: React.FC<Props> = ({ config, onChange, assets, onU
                     <div className="flex justify-between items-center text-[9px] font-black text-white/30 uppercase tracking-[0.15em]">
                       <span className="flex items-center gap-2">
                         <Focus size={10} className="text-blue-500" />
-                        Aesthetics
+                        {config.type === 'blur' ? 'Dynamic Flux' : 'Atmospheric Depth'}
                       </span>
                       <span className="bg-white/10 px-2 py-0.5 rounded text-white/60">{Math.round(config.blurIntensity)}%</span>
                     </div>
@@ -339,7 +393,7 @@ export const BackgroundPanel: React.FC<Props> = ({ config, onChange, assets, onU
                       <div className="absolute left-0 h-1.5 bg-blue-500/20 rounded-full pointer-events-none" style={{ width: `${config.blurIntensity}%` }} />
                     </div>
                     <p className="text-[8px] text-white/10 font-medium px-1 italic">
-                      {config.type === 'blur' ? 'Minimum blur applied to preserve abstract look' : 'Adjust focus depth'}
+                      {config.type === 'blur' ? 'Modulate the turbulence and speed of the dynamic flow' : 'Adjust focus depth'}
                     </p>
                 </div>
             </div>

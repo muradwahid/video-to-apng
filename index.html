@@ -1,6 +1,21 @@
 <!doctype html>
 <html lang="en">
   <head>
+    <script>
+      window.addEventListener('error', (event) => {
+        console.error('GLOBAL_ERROR:', event.message || event.error?.message, event.filename, event.lineno);
+      });
+      window.addEventListener('unhandledrejection', (event) => {
+        let reason = event.reason;
+        let msg = reason;
+        if (reason && reason instanceof Error) {
+            msg = reason.message + '\n' + reason.stack;
+        } else if (typeof reason === 'object') {
+            msg = JSON.stringify(reason);
+        }
+        console.error('GLOBAL_PROMISE_REJECTION:', msg);
+      });
+    </script>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>My Google AI Studio App</title>

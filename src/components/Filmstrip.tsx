@@ -22,14 +22,22 @@ export const Filmstrip: React.FC<Props> = ({ url, duration, zoom, sourceStart, s
     const frames: string[] = [];
 
     const generateFrames = async () => {
+      if (!url) {
+        if (isMounted) setThumbnails([]);
+        return;
+      }
       const video = document.createElement("video");
+      video.crossOrigin = "anonymous";
       video.src = url;
       video.muted = true;
       video.playsInline = true;
       video.preload = "auto";
       videoRef.current = video;
 
-      await new Promise((resolve) => (video.onloadedmetadata = resolve));
+      await new Promise<void>((resolve) => {
+        video.onloadedmetadata = () => resolve();
+        video.onerror = () => resolve();
+      });
       
       const canvas = document.createElement("canvas");
       canvas.width = 160;
@@ -43,11 +51,18 @@ export const Filmstrip: React.FC<Props> = ({ url, duration, zoom, sourceStart, s
         const seekTime = sourceStart + i * interval;
         video.currentTime = seekTime;
         
-        await new Promise((resolve) => (video.onseeked = resolve));
+        await new Promise<void>((resolve) => {
+          video.onseeked = () => resolve();
+          video.onerror = () => resolve();
+        });
         
-        if (ctx) {
-          ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
-          frames.push(canvas.toDataURL("image/jpeg", 0.5));
+        if (ctx && video.readyState >= 2) {
+          try {
+            ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
+            frames.push(canvas.toDataURL("image/jpeg", 0.5));
+          } catch (e) {
+            // Context might be tainted
+          }
         }
       }
 
